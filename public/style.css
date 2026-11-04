@@ -1,0 +1,273 @@
+:root {
+  --bg: #0E2A28;
+  --panel: #123832;
+  --panel-2: #16423B;
+  --ink: #06110F;
+  --text: #F2FBF9;
+  --muted: #8FBDB6;
+  --yellow: #FFD60A;
+  --red: #E63946;
+  --blue: #3A86FF;
+  --green: #06D6A0;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  background-image:
+    radial-gradient(circle at 15% 20%, rgba(6, 214, 160, 0.06), transparent 40%),
+    radial-gradient(circle at 85% 80%, rgba(230, 57, 70, 0.06), transparent 40%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
+
+.view {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.hidden { display: none !important; }
+
+/* ---------- 首屏 ---------- */
+.landing-wrap { width: 100%; max-width: 760px; text-align: center; }
+
+.brand-badge {
+  width: 56px; height: 56px; margin: 0 auto 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--yellow); color: var(--ink);
+  border: 3px solid var(--ink); border-radius: 12px;
+  font-size: 28px; font-weight: 800;
+  transform: rotate(-6deg);
+}
+.brand h1 {
+  font-size: 44px; font-weight: 700; letter-spacing: -0.01em;
+  margin-bottom: 32px;
+}
+
+.card-row { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+
+.panel {
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: var(--radius);
+  box-shadow: 6px 6px 0 var(--ink);
+  padding: 22px;
+  width: 300px;
+  text-align: left;
+}
+.panel h2 { font-size: 18px; margin-bottom: 16px; }
+
+.field { display: block; margin-bottom: 12px; }
+.field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.field input {
+  width: 100%; padding: 10px 12px; font-size: 16px;
+  background: var(--bg); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 8px;
+  outline: none;
+}
+.field input:focus { border-color: var(--green); }
+
+.btn {
+  display: block; width: 100%; padding: 12px 16px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 15px; font-weight: 700;
+  border: 3px solid var(--ink); border-radius: 10px;
+  cursor: pointer; box-shadow: 4px 4px 0 var(--ink);
+  transition: transform .08s ease;
+}
+.btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:disabled:active { transform: none; box-shadow: 4px 4px 0 var(--ink); }
+
+.btn-primary { background: var(--yellow); color: var(--ink); }
+.btn-secondary { background: var(--green); color: var(--ink); }
+.btn-ghost { background: transparent; color: var(--text); box-shadow: none; margin-top: 10px; border-color: var(--muted); }
+
+.error-msg { color: var(--red); font-weight: 600; min-height: 20px; margin: 18px 0 0; }
+
+/* ---------- 等待室 ---------- */
+.lobby-wrap { width: 100%; max-width: 480px; text-align: center; }
+
+.ticket {
+  background: var(--panel);
+  border: 3px dashed var(--yellow);
+  border-radius: var(--radius);
+  padding: 22px 16px;
+  margin-bottom: 24px;
+  position: relative;
+}
+.ticket-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.ticket-code {
+  display: block; font-family: 'JetBrains Mono', monospace;
+  font-size: 48px; font-weight: 800; letter-spacing: .18em;
+  color: var(--yellow); margin: 6px 0;
+}
+
+.player-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 22px; }
+.player-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel-2); border: 2px solid var(--ink); border-radius: 10px;
+  padding: 10px 14px; text-align: left;
+}
+.player-dot { width: 16px; height: 16px; border-radius: 4px; border: 2px solid var(--ink); flex-shrink: 0; }
+.player-name { font-weight: 600; flex: 1; }
+.player-tag { font-size: 11px; color: var(--ink); background: var(--yellow); padding: 2px 8px; border-radius: 6px; font-weight: 700; }
+
+.lobby-actions { display: flex; flex-direction: column; }
+
+/* ---------- 游戏界面 ---------- */
+.game-wrap { width: 100%; max-width: 960px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+.hud {
+  width: 100%; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;
+}
+.hud-item {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 2px solid var(--ink); border-radius: 8px;
+  padding: 6px 12px; font-weight: 700; font-size: 14px;
+}
+.hud-dot { width: 12px; height: 12px; border-radius: 3px; border: 2px solid var(--ink); }
+.hud-item.dead { opacity: .4; text-decoration: line-through; }
+
+.canvas-shell { position: relative; width: 100%; max-width: 960px; }
+#game-canvas {
+  width: 100%; height: auto; display: block;
+  background: #1B4B43;
+  border: 4px solid var(--ink); border-radius: 12px;
+}
+
+.overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 17, 15, 0.72); border-radius: 12px;
+}
+.overlay-card {
+  background: var(--panel); border: 3px solid var(--ink); border-radius: var(--radius);
+  box-shadow: 6px 6px 0 var(--ink); padding: 26px 40px; text-align: center;
+}
+.overlay-title { font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 700; }
+.overlay-sub { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+@media (max-width: 560px) {
+  .brand h1 { font-size: 32px; }
+  .panel { width: 100%; max-width: 320px; }
+  .ticket-code { font-size: 36px; }
+}
+
+/* ---------- 移动端虚拟控件 ---------- */
+.touch-controls {
+  display: none; /* 默认隐藏，JS 检测到触屏设备后加 body.is-touch 才显示 */
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none; /* 容器本身不拦截点击，只有内部控件可交互 */
+}
+body.is-touch .touch-controls { display: block; }
+
+/* 触屏模式下适当收窄游戏视图内边距，给画布留出更多空间 */
+body.is-touch #view-game.view { padding: 12px; }
+body.is-touch .game-wrap { gap: 8px; }
+
+.joystick-zone {
+  position: absolute;
+  left: max(30px, env(safe-area-inset-left));
+  bottom: max(30px, env(safe-area-inset-bottom));
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  background: rgba(18, 56, 50, 0.55);
+  border: 3px solid var(--ink);
+  box-shadow: 4px 4px 0 rgba(6, 17, 15, 0.4);
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.joystick-stick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  border-radius: 50%;
+  background: var(--yellow);
+  border: 3px solid var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  transform: translate(0, 0);
+  transition: transform .05s linear;
+}
+.joystick-zone.active .joystick-stick { transition: none; }
+
+.btn-fire {
+  position: absolute;
+  right: max(24px, env(safe-area-inset-right));
+  bottom: max(28px, env(safe-area-inset-bottom));
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  background: rgba(230, 57, 70, 0.55); /* 半透明，避免整块遮住下面的地图 */
+  color: var(--text);
+  border: 3px solid var(--ink);
+  box-shadow: 4px 4px 0 rgba(6, 17, 15, 0.4);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+.btn-fire.active {
+  background: rgba(255, 92, 102, 0.75); /* 按下时稍微更实一点，给出明确的按压反馈 */
+  box-shadow: 1px 1px 0 rgba(6, 17, 15, 0.4);
+  transform: translate(3px, 3px);
+}
+
+.btn-move-toggle {
+  position: absolute;
+  right: max(24px, env(safe-area-inset-right));
+  /* 叠在开火按钮正上方：开火按钮 bottom + 开火按钮高度(84px) + 间距(14px) */
+  bottom: calc(max(28px, env(safe-area-inset-bottom)) + 84px + 14px);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(18, 56, 50, 0.55); /* 半透明，静止态用 panel 色系，避免遮挡地图 */
+  color: var(--muted);
+  border: 3px solid var(--ink);
+  box-shadow: 4px 4px 0 rgba(6, 17, 15, 0.4);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  transition: transform .08s ease, background-color .12s ease, color .12s ease;
+}
+.btn-move-toggle.active {
+  background: rgba(6, 214, 160, 0.6); /* 移动态改用绿色，一眼区分开当前状态 */
+  color: var(--ink);
+  box-shadow: 1px 1px 0 rgba(6, 17, 15, 0.4);
+  transform: translate(3px, 3px);
+}
+
+/* 竖屏时画布变矮，把控件往下压一点避免贴得太近 */
+@media (max-width: 560px) and (orientation: portrait) {
+  .joystick-zone { width: 108px; height: 108px; }
+  .joystick-stick { width: 46px; height: 46px; margin: -23px 0 0 -23px; }
+  .btn-fire { width: 72px; height: 72px; font-size: 12px; }
+  .btn-move-toggle {
+    width: 56px;
+    height: 56px;
+    font-size: 11px;
+    bottom: calc(max(28px, env(safe-area-inset-bottom)) + 72px + 12px);
+  }
+}
