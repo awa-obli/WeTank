@@ -95,14 +95,29 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .error-msg { color: var(--red); font-weight: 600; min-height: 20px; margin: 18px 0 0; }
 
 /* ---------- 等待室 ---------- */
-.lobby-wrap { width: 100%; max-width: 480px; text-align: center; }
+/* 两列布局：左列是房间码、玩家列表和开始/离开按钮，右列是房间设置（地图大小在最上面）。
+   窄屏（<720px）自动堆叠成一列，顺序为 房间码/玩家 → 设置 → 操作按钮。 */
+.lobby-wrap { width: 100%; max-width: 820px; text-align: left; }
+
+.lobby-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  grid-template-areas:
+    "main side"
+    "actions side";
+  gap: 18px 22px;
+  align-items: start;
+}
+.lobby-main { grid-area: main; min-width: 0; }
+.lobby-side { grid-area: side; min-width: 0; }
+.lobby-actions { grid-area: actions; display: flex; flex-direction: column; }
 
 .ticket {
   background: var(--panel);
   border: 3px dashed var(--yellow);
   border-radius: var(--radius);
   padding: 22px 16px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
   position: relative;
 }
 .ticket-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
@@ -112,7 +127,11 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   color: var(--yellow); margin: 6px 0;
 }
 
-.player-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 22px; }
+/* 7 人时列表会变长：限制高度并允许滚动，避免把下方的"开始游戏"按钮顶出屏幕 */
+.player-list {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 46vh; overflow-y: auto; padding-right: 4px;
+}
 .player-row {
   display: flex; align-items: center; gap: 12px;
   background: var(--panel-2); border: 2px solid var(--ink); border-radius: 10px;
@@ -122,7 +141,77 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .player-name { font-weight: 600; flex: 1; }
 .player-tag { font-size: 11px; color: var(--ink); background: var(--yellow); padding: 2px 8px; border-radius: 6px; font-weight: 700; }
 
-.lobby-actions { display: flex; flex-direction: column; }
+/* 房间设置面板：与玩家列表同一套描边/投影风格 */
+.settings-panel {
+  background: var(--panel);
+  border: 3px solid var(--ink);
+  border-radius: var(--radius);
+  box-shadow: 6px 6px 0 var(--ink);
+  padding: 18px;
+}
+.settings-title { font-size: 16px; margin-bottom: 16px; }
+.settings-label {
+  display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+}
+
+/* 地图大小：三档按钮竖排，选中档黄色高亮；非房主看到的按钮是禁用态（只读）。 */
+.map-picker { display: flex; flex-direction: column; gap: 8px; }
+.map-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; padding: 10px 12px;
+  background: var(--bg); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.55);
+  font: inherit; font-size: 14px; font-weight: 700;
+  cursor: pointer;
+  transition: transform .08s ease;
+}
+.map-option-dims { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; color: var(--muted); }
+.map-option.active { background: var(--yellow); color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+.map-option.active .map-option-dims { color: var(--ink); opacity: .65; }
+.map-option:not(:disabled):hover { border-color: var(--green); }
+.map-option:not(:disabled):active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+.map-option:disabled { cursor: not-allowed; }
+.map-option:disabled:not(.active) { opacity: .45; }
+.map-option:disabled.active { opacity: .85; }
+
+/* 初始血量：数字输入 + 两侧 −/+ 微调；非房主整组禁用，只读显示当前值 */
+.settings-group + .settings-group { margin-top: 18px; }
+.hp-control { display: flex; align-items: center; gap: 8px; }
+.hp-step {
+  flex: 0 0 auto; width: 34px; height: 38px;
+  background: var(--bg); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.55);
+  font: 700 18px 'Space Grotesk', sans-serif;
+  cursor: pointer;
+}
+.hp-step:not(:disabled):hover { border-color: var(--green); }
+.hp-step:not(:disabled):active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+.hp-step:disabled { opacity: .45; cursor: not-allowed; }
+.hp-input {
+  width: 58px; height: 38px; text-align: center;
+  background: var(--bg); color: var(--yellow);
+  border: 2px solid var(--ink); border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 800;
+  outline: none;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.hp-input:focus { border-color: var(--green); }
+.hp-input::-webkit-outer-spin-button,
+.hp-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.hp-input:disabled { opacity: .6; color: var(--text); cursor: not-allowed; }
+
+@media (max-width: 720px) {
+  .lobby-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "main"
+      "side"
+      "actions";
+  }
+}
 
 /* ---------- 游戏界面 ---------- */
 .game-wrap { width: 100%; max-width: 960px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
@@ -136,7 +225,20 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   padding: 6px 12px; font-weight: 700; font-size: 14px;
 }
 .hud-dot { width: 12px; height: 12px; border-radius: 3px; border: 2px solid var(--ink); }
-.hud-item.dead { opacity: .4; text-decoration: line-through; }
+.hud-hp {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700;
+  color: var(--green);
+}
+.hud-hp-icon { width: 12px; height: 12px; display: block; flex-shrink: 0; }
+.hud-hp-icon path { fill: currentColor; }
+.hud-hp-text { line-height: 1; }
+.hud-hp.low { color: var(--red); }
+/* 阵亡后爱心和血量数字固定红色，并保留 .hud-item.dead 的删除线/淡化 */
+.hud-item.dead .hud-hp { color: var(--red); }
+.hud-item.dead { opacity: .4; }
+/* 删除线只画在昵称/比分上，血量区域（爱心 + 数字）保持干净 */
+.hud-item.dead .hud-label { text-decoration: line-through; }
 
 .canvas-shell { position: relative; width: 100%; max-width: 960px; }
 #game-canvas {
@@ -169,6 +271,13 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   inset: 0;
   z-index: 20;
   pointer-events: none; /* 容器本身不拦截点击，只有内部控件可交互 */
+
+  /* 摇杆与开火键共用同一条左右留白和底部基准线，保证两者底边齐平、
+     左右离屏幕边缘的距离一致；max() 同时取左右安全区，刘海屏横屏也保持对称 */
+  --control-edge: max(46px, env(safe-area-inset-left), env(safe-area-inset-right));
+  --control-bottom: max(46px, env(safe-area-inset-bottom));
+  --fire-size: 84px;
+  --fire-gap: 14px;
 }
 body.is-touch .touch-controls { display: block; }
 
@@ -176,10 +285,43 @@ body.is-touch .touch-controls { display: block; }
 body.is-touch #view-game.view { padding: 12px; }
 body.is-touch .game-wrap { gap: 8px; }
 
+/* 横屏触屏且屏幕较矮时：把游戏页锁在视口高度内，让画布按剩余高度等比缩放，
+   这样地图不用滚动就能完整显示（宽屏时地图两侧会留白，正好避开虚拟控件） */
+@media (orientation: landscape) and (max-height: 720px) {
+  body.is-touch #view-game.view {
+    height: 100vh;      /* 不支持 dvh 的浏览器回退到传统视口高度 */
+    height: 100dvh;     /* 跟随移动端地址栏/工具栏收放，避免底部被遮住 */
+    min-height: 0;
+    overflow: hidden;
+    padding: 8px 12px;
+  }
+
+  body.is-touch .game-wrap {
+    height: 100%;
+  }
+
+  body.is-touch .canvas-shell {
+    /* 占满 HUD 以下的剩余高度；min-height:0 允许它在矮屏上收缩 */
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  body.is-touch #game-canvas {
+    /* 绝对居中，按 960:640 的原始比例取较小缩放，宽高都不会超出剩余空间 */
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+  }
+}
+
 .joystick-zone {
   position: absolute;
-  left: max(30px, env(safe-area-inset-left));
-  bottom: max(30px, env(safe-area-inset-bottom));
+  left: var(--control-edge);
+  bottom: var(--control-bottom);
   width: 128px;
   height: 128px;
   border-radius: 50%;
@@ -208,10 +350,10 @@ body.is-touch .game-wrap { gap: 8px; }
 
 .btn-fire {
   position: absolute;
-  right: max(24px, env(safe-area-inset-right));
-  bottom: max(28px, env(safe-area-inset-bottom));
-  width: 84px;
-  height: 84px;
+  right: var(--control-edge);
+  bottom: var(--control-bottom);
+  width: var(--fire-size);
+  height: var(--fire-size);
   border-radius: 50%;
   background: rgba(230, 57, 70, 0.55); /* 半透明，避免整块遮住下面的地图 */
   color: var(--text);
@@ -233,9 +375,9 @@ body.is-touch .game-wrap { gap: 8px; }
 
 .btn-move-toggle {
   position: absolute;
-  right: max(24px, env(safe-area-inset-right));
-  /* 叠在开火按钮正上方：开火按钮 bottom + 开火按钮高度(84px) + 间距(14px) */
-  bottom: calc(max(28px, env(safe-area-inset-bottom)) + 84px + 14px);
+  right: var(--control-edge);
+  /* 叠在开火按钮正上方：开火按钮底部基准 + 开火按钮高度 + 间距 */
+  bottom: calc(var(--control-bottom) + var(--fire-size) + var(--fire-gap));
   width: 64px;
   height: 64px;
   border-radius: 50%;
@@ -261,13 +403,13 @@ body.is-touch .game-wrap { gap: 8px; }
 
 /* 竖屏时画布变矮，把控件往下压一点避免贴得太近 */
 @media (max-width: 560px) and (orientation: portrait) {
+  .touch-controls { --fire-size: 72px; --fire-gap: 12px; }
   .joystick-zone { width: 108px; height: 108px; }
   .joystick-stick { width: 46px; height: 46px; margin: -23px 0 0 -23px; }
-  .btn-fire { width: 72px; height: 72px; font-size: 12px; }
+  .btn-fire { font-size: 12px; }
   .btn-move-toggle {
     width: 56px;
     height: 56px;
     font-size: 11px;
-    bottom: calc(max(28px, env(safe-area-inset-bottom)) + 72px + 12px);
   }
 }

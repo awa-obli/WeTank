@@ -21,6 +21,10 @@
 
   const lobbyCodeEl = document.getElementById('lobby-code');
   const lobbyPlayersEl = document.getElementById('lobby-players');
+  const mapPickerEl = document.getElementById('map-picker');
+  const hpInputEl = document.getElementById('hp-input');
+  const btnHpMinus = document.getElementById('btn-hp-minus');
+  const btnHpPlus = document.getElementById('btn-hp-plus');
   const btnStart = document.getElementById('btn-start');
   const btnLeaveLobby = document.getElementById('btn-leave-lobby');
 
@@ -42,6 +46,10 @@
   let hostId = null;
   let roomCode = null;
   let players = [];
+  let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改
+  let maxHp = 3; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
+  const MIN_HP = 1;
+  const MAX_HP = 20;
   let maze = null;
   let worldW = 960, worldH = 640;
   let tanks = [];
@@ -49,12 +57,24 @@
   let items = []; // 场上道具：{id, type, x, y}
   let explosions = []; // 死亡爆炸特效：{x, y, color, startTime}
   let trails = []; // 加速拖尾粒子：{x, y, start}
+  let spawnBlockFx = []; // 出生保护格挡火花：{x, y, start}
   let prevPos = {}; // id -> 上一帧坐标 {x, y}，用来算加速拖尾的运动方向
   let prevShield = {}; // id -> 上一帧是否有护盾，用来检测"护盾刚被打破"这一瞬间
-  const ITEM_COLORS = { shield: '#3A86FF', speed: '#FFD60A', triple: '#E63946', homing: '#B565D8', invisible: '#8FBDB6' };
+  const ITEM_COLORS = { shield: '#3A86FF', speed: '#FFD60A', triple: '#E63946', homing: '#B565D8', invisible: '#8FBDB6', repair: '#2ECC71' };
+  const ITEM_GLYPHS = { shield: '盾', speed: '速', triple: '三', homing: '追', invisible: '隐', repair: '修' };
+  // 与服务端 MAP_PRESETS 一一对应：这里只用 key 发请求、用尺寸做展示文案，
+  // 真正的行列数以服务端开局广播的 game_start 为准。
+  const MAP_OPTIONS = [
+    { key: 'small', name: '小', cols: 9, rows: 6 },
+    { key: 'medium', name: '中', cols: 12, rows: 8 },
+    { key: 'large', name: '大', cols: 15, rows: 10 },
+  ];
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
+  const SPAWN_PROTECT_TIME = 3; // 与服务端 SPAWN_PROTECT_TIME 一致，用于把剩余秒数换算成进度弧比例
   let prevAlive = {};  // id -> 上一帧是否存活，用来检测"刚刚死亡"这一瞬间
+  let lastHp = {};     // id -> 最近一次收到的血量，用于 HUD 在回合结束/重开时仍显示正确数值
+  let hitFlash = {};   // id -> 最近一次受击的时间戳，用来在车身上闪一层白
 
   // 名字标签贴边时用来把绘制坐标钳制在 canvas 内的内边距
   const LABEL_PAD = 4;
@@ -124,6 +144,8 @@
         hostId = msg.hostId;
         roomCode = msg.code;
         players = msg.players;
+        mapSize = msg.mapSize || 'medium';
+        maxHp = msg.maxHp || 3;
         lobbyCodeEl.textContent = roomCode;
         renderLobby();
         showView('lobby');
@@ -136,6 +158,8 @@
       case 'room_update':
         hostId = msg.hostId;
         players = msg.players;
+        mapSize = msg.mapSize || mapSize;
+        maxHp = msg.maxHp || maxHp;
         renderLobby();
         break;
 
@@ -143,9 +167,19 @@
         maze = msg.maze;
         worldW = msg.worldW;
         worldH = msg.worldH;
+        maxHp = msg.maxHp || maxHp;
+        // 画布按世界尺寸调整（CSS 负责等比缩放到容器），这样不同档位的地图
+        // 都能用同一套世界坐标绘制，不需要额外换算缩放比。
+        canvas.width = worldW;
+        canvas.height = worldH;
         players = msg.players;
         explosions = [];
         trails = [];
+        spawnBlockFx = [];
+        hitSparks = [];
+        floatTexts = [];
+        hitFlash = {};
+        lastHp = {};
         items = [];
         prevAlive = {};
         prevShield = {};
@@ -159,6 +193,7 @@
         detectDeaths(msg.tanks);
         updateSpeedTrails(msg.tanks);
         tanks = msg.tanks;
+        msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
         applyJoystickSteering(); // 用刚收到的最新朝向重新计算该转左还是转右
@@ -166,9 +201,35 @@
         draw();
         break;
 
+      case 'spawn_block':
+        // 出生保护挡下子弹：在命中点放一圈很快扩散消失的白色火花
+        (msg.blocks || []).forEach((b) => spawnBlockFx.push({ x: b.x, y: b.y, start: performance.now() }));
+        break;
+
+      case 'damage':
+        // 真正掉血：车身闪白 + 命中点火花 + 飘一个 -1
+        (msg.hits || []).forEach((h) => {
+          hitFlash[h.playerId] = performance.now();
+          spawnHitSpark(h.x, h.y);
+          spawnFloatText(h.x, h.y - 8, '-1', '#FF6B6B');
+        });
+        break;
+
+      case 'item_pickup':
+        // 维修包回血：在坦克上方飘一个绿色 +1；满血捡包时 heal 为 0，不飘字
+        (msg.pickups || []).forEach((p) => {
+          if (p.type !== 'repair' || !p.heal) return;
+          const tank = tanks.find((t) => t.id === p.playerId);
+          if (tank) spawnFloatText(tank.x, tank.y - 30, '+1', '#06D6A0');
+        });
+        break;
+
       case 'round_end':
         players = msg.scores;
         renderHud();
+        // renderHud 会重建 HUD，死状态（删除线/红心）会丢；用最后一帧坦克状态补回来，
+        // 让结算展示期间阵亡玩家继续显示红色 + 删除线。
+        renderHudFromTanks();
         overlayTitle.textContent = msg.winnerId
           ? `${nameOf(msg.winnerId)} 获胜本回合！`
           : '平局！';
@@ -179,6 +240,7 @@
       case 'match_end':
         players = msg.scores;
         renderHud();
+        renderHudFromTanks();
         if (msg.reason === 'not_enough_players') {
           overlayTitle.textContent = '对手已离开';
           overlaySub.textContent = '即将返回房间…';
@@ -246,9 +308,88 @@
       btnStart.disabled = true;
       btnStart.textContent = '等待房主开始…';
     }
+
+    renderMapPicker();
+    renderHpSetting();
   }
 
+  // 大厅右侧的地图大小选择：房主可点，其他玩家只能看到当前档位（按钮禁用，保持只读）。
+  // 不做本地乐观更新——点击后等服务端 room_update 回来再改高亮，
+  // 这样房主改档位时所有人的显示始终来自同一份权威状态。
+  function renderMapPicker() {
+    const amHost = myId === hostId;
+    mapPickerEl.innerHTML = '';
+    MAP_OPTIONS.forEach((opt) => {
+      const isActive = opt.key === mapSize;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'map-option' + (isActive ? ' active' : '');
+      btn.dataset.size = opt.key;
+      btn.disabled = !amHost;
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+      const name = document.createElement('span');
+      name.className = 'map-option-name';
+      name.textContent = opt.name;
+
+      const dims = document.createElement('span');
+      dims.className = 'map-option-dims';
+      dims.textContent = `${opt.cols} × ${opt.rows}`;
+
+      btn.appendChild(name);
+      btn.appendChild(dims);
+      btn.addEventListener('click', () => {
+        if (myId !== hostId || mapSize === opt.key) return;
+        send({ type: 'set_map_size', size: opt.key });
+      });
+      mapPickerEl.appendChild(btn);
+    });
+  }
+
+  // ---------- 初始血量设置 ----------
+  // 大厅右侧的初始血量：房主可直接输入 1–20 的整数，也可以用两侧的 −/+ 微调；
+  // 其他玩家只能看到当前数值（控件禁用）。和地图大小一样不做本地乐观更新：
+  // 改完等服务端 room_update 回来，所有人看到的血量上限始终来自同一份权威状态。
+  function clampHpValue(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return maxHp;
+    return clampNum(n, MIN_HP, MAX_HP);
+  }
+
+  function renderHpSetting() {
+    const amHost = myId === hostId;
+    // 正在输入时不要覆盖用户正在敲的内容；失焦/发送后自然会被服务端值收敛
+    if (document.activeElement !== hpInputEl) hpInputEl.value = String(maxHp);
+    hpInputEl.disabled = !amHost;
+    btnHpMinus.disabled = !amHost;
+    btnHpPlus.disabled = !amHost;
+  }
+
+  function requestHp(value) {
+    const next = clampHpValue(value);
+    hpInputEl.value = String(next);
+    if (next !== maxHp) send({ type: 'set_hp', hp: next });
+  }
+
+  hpInputEl.addEventListener('change', () => requestHp(hpInputEl.value));
+  btnHpMinus.addEventListener('click', () => requestHp(clampHpValue(hpInputEl.value) - 1));
+  btnHpPlus.addEventListener('click', () => requestHp(clampHpValue(hpInputEl.value) + 1));
+
   // ---------- HUD ----------
+  // 顶部血量的爱心用内联 SVG 画，颜色跟随 .hud-hp 的 currentColor（残血时整组变红）
+  const HEART_PATH = 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z';
+
+  function makeHeartIcon() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('class', 'hud-hp-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', HEART_PATH);
+    svg.appendChild(path);
+    return svg;
+  }
+
   function renderHud() {
     hudScores.innerHTML = '';
     players.forEach((p) => {
@@ -259,9 +400,20 @@
       dot.className = 'hud-dot';
       dot.style.background = p.color;
       const label = document.createElement('span');
+      label.className = 'hud-label';
       label.textContent = `${p.name} · ${p.score}`;
+      const hp = document.createElement('span');
+      hp.className = 'hud-hp';
+      hp.id = 'hud-hp-' + p.id;
+      hp.appendChild(makeHeartIcon());
+      const hpText = document.createElement('span');
+      hpText.className = 'hud-hp-text';
+      // 刚开局还没收到 state 时先按满血显示，收到第一帧后就会被真实血量覆盖
+      hpText.textContent = `${lastHp[p.id] ?? maxHp}/${maxHp}`;
+      hp.appendChild(hpText);
       item.appendChild(dot);
       item.appendChild(label);
+      item.appendChild(hp);
       hudScores.appendChild(item);
     });
   }
@@ -269,6 +421,15 @@
     tanks.forEach((t) => {
       const el = document.getElementById('hud-' + t.id);
       if (el) el.classList.toggle('dead', !t.alive);
+      const hpEl = document.getElementById('hud-hp-' + t.id);
+      if (hpEl) {
+        const hpTextEl = hpEl.querySelector('.hud-hp-text');
+        if (hpTextEl) hpTextEl.textContent = `${t.hp}/${maxHp}`;
+        // 残血（1/3 及以下）用红色提醒；阵亡后移除红色，恢复成正常绿色。
+        // 这里用显式 add/remove 而不是 toggle，保证死亡瞬间一定会清掉 low。
+        if (t.alive && t.hp > 0 && t.hp <= maxHp / 3) hpEl.classList.add('low');
+        else hpEl.classList.remove('low');
+      }
     });
   }
 
@@ -298,7 +459,43 @@
     ctx.strokeRect(4, 4, worldW - 8, worldH - 8);
   }
 
-  function drawTank(t) {
+  // ---------- 头顶血条 ----------
+  const HP_BAR_WIDTH_MAX = 56;
+
+  // 血条颜色随剩余比例变化：绿 → 黄 → 红，残血一眼就能看出来
+  function hpColor(ratio) {
+    if (ratio > 0.6) return '#06D6A0';
+    if (ratio > 0.3) return '#FFD60A';
+    return '#E63946';
+  }
+
+  // 分段血条：格数 = 房间设置的初始血量（1–20），掉一格就是少 1 点。
+  // 格数多时自动收窄格宽，整条宽度封顶 56px，不会比坦克大太多。
+  function drawHpBar(t, barY) {
+    const total = Math.max(1, maxHp);
+    const hp = clampNum(t.hp == null ? total : t.hp, 0, total);
+    const gap = total >= 10 ? 1 : 2;
+    const barW = Math.min(HP_BAR_WIDTH_MAX, total * 8);
+    const segW = (barW - (total - 1) * gap) / total;
+    const x0 = clampNum(t.x - barW / 2, LABEL_PAD, canvas.width - barW - LABEL_PAD);
+    const y = clampNum(barY, 2, canvas.height - 9);
+    const color = hpColor(hp / total);
+
+    ctx.save();
+    // 深色背板：无论压在绿色地面、白色名字还是特效上都看得清
+    ctx.fillStyle = '#06110F';
+    ctx.beginPath();
+    ctx.roundRect(x0 - 2, y - 2, barW + 4, 9, 3);
+    ctx.fill();
+
+    for (let i = 0; i < total; i++) {
+      ctx.fillStyle = i < hp ? color : 'rgba(242, 251, 249, 0.16)';
+      ctx.fillRect(x0 + i * (segW + gap), y, segW, 5);
+    }
+    ctx.restore();
+  }
+
+  function drawTank(t, now) {
     const isSelf = t.id === myId;
     // 别人视角：隐身的坦克完全不画（车身、炮管、护盾光环、名字全部跳过）
     if (t.invisible && !isSelf) return;
@@ -351,6 +548,19 @@
     ctx.fill();
     ctx.stroke();
 
+    // 受击闪白：命中后的一小段时间里在车身上叠一层白色，给出"挨打了"的即时反馈
+    const flashStart = hitFlash[t.id];
+    if (flashStart !== undefined) {
+      const flashT = (now - flashStart) / HIT_FLASH_DURATION;
+      if (flashT < 1) {
+        ctx.globalAlpha *= 0.65 * (1 - flashT);
+        ctx.fillStyle = '#F2FBF9';
+        ctx.beginPath();
+        ctx.roundRect(-15, -15, 30, 30, 6);
+        ctx.fill();
+      }
+    }
+
     ctx.restore();
 
     if (t.alive) {
@@ -369,16 +579,43 @@
         ctx.restore();
       }
 
+      // 出生无敌：白色细环 + 剩余时间进度弧。和道具护盾（蓝色虚线环）在颜色和
+      // 线型上都不同，玩家一眼能分清"刚出生的 3 秒保护"和"捡到的护盾"。
+      // spawnProtect 是剩余秒数，进度弧随剩余时间收短。
+      if (t.spawnProtect > 0) {
+        const remain = Math.min(SPAWN_PROTECT_TIME, Math.max(0, t.spawnProtect));
+        const frac = remain / SPAWN_PROTECT_TIME;
+        const ringR = TANK_RADIUS + 10;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, ringR, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(242, 251, 249, 0.25)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // 进度弧从 12 点方向顺时针展开，弧长 = 剩余时间比例
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+        ctx.strokeStyle = '#F2FBF9';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.fillStyle = '#F2FBF9';
       ctx.font = '600 13px Inter, sans-serif';
       ctx.textAlign = 'center';
-      // 名字默认画在坦克正上方(t.y - 26)，但坦克可以贴着地图边缘移动
-      // (服务端允许坦克中心到 TANK_RADIUS=16)，这时 26px 的偏移会把文字
-      // 顶到 canvas 可见区域外面，被裁掉、看起来像"消失在地图外的背景里"。
-      // 这里把绘制坐标钳制在 canvas 范围内(留一点内边距)，保证名字始终完整可见。
+      // 血条紧贴车身上沿，名字再往上一点。坦克可以贴着地图边缘移动，
+      // 上方空间不够时（名字会顶出 canvas）就把"血条+名字"整体挪到坦克下方，
+      // 两者不会互相压住，也不会被裁掉。
+      const belowLabel = t.y - 29 < LABEL_TOP_PAD;
+      drawHpBar(t, belowLabel ? t.y + 20 : t.y - 22);
+
       const textWidth = ctx.measureText(t.name).width;
       const labelX = clampNum(t.x, textWidth / 2 + LABEL_PAD, canvas.width - textWidth / 2 - LABEL_PAD);
-      const labelY = clampNum(t.y - 26, LABEL_TOP_PAD, canvas.height - LABEL_PAD);
+      const labelY = clampNum(belowLabel ? t.y + 40 : t.y - 29, LABEL_TOP_PAD, canvas.height - LABEL_PAD);
       ctx.fillText(t.name, labelX, labelY);
       ctx.restore();
     }
@@ -470,6 +707,85 @@
     });
   }
 
+  // ---------- 出生保护格挡火花 ----------
+  // 服务端在子弹被 3 秒出生保护吸收时广播 spawn_block（带命中点），
+  // 这里画一圈快速扩散淡出的白色圆环，比只让子弹凭空消失更容易看懂。
+  const SPAWN_BLOCK_DURATION = 300; // ms
+
+  function drawSpawnBlocks(now) {
+    spawnBlockFx = spawnBlockFx.filter((e) => now - e.start < SPAWN_BLOCK_DURATION);
+    spawnBlockFx.forEach((e) => {
+      const t = (now - e.start) / SPAWN_BLOCK_DURATION; // 0..1
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 5 + 14 * t, 0, Math.PI * 2);
+      ctx.strokeStyle = '#F2FBF9';
+      ctx.lineWidth = 2.5 * (1 - t) + 0.5;
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
+
+  // ---------- 受击火花 / 掉血飘字 ----------
+  // 服务端把真正掉血的命中点广播成 damage，这里画几颗短促的黄色火花并飘一个 -1；
+  // 死亡爆炸仍然由 detectDeaths 负责，两者互不冲突。
+  const HIT_FLASH_DURATION = 160; // ms，车身闪白
+  const HIT_SPARK_DURATION = 260; // ms
+  const HIT_SPARK_PARTICLES = 5;
+  let hitSparks = []; // 受击火花：{x, y, particles, start}
+  let floatTexts = []; // 飘字：{x, y, text, color, start}
+
+  function spawnHitSpark(x, y) {
+    const particles = [];
+    for (let i = 0; i < HIT_SPARK_PARTICLES; i++) {
+      const angle = (Math.PI * 2 * i) / HIT_SPARK_PARTICLES + (Math.random() - 0.5) * 0.6;
+      const dist = 10 + Math.random() * 8;
+      particles.push({ angle, dist });
+    }
+    hitSparks.push({ x, y, particles, start: performance.now() });
+  }
+
+  function drawHitSparks(now) {
+    hitSparks = hitSparks.filter((e) => now - e.start < HIT_SPARK_DURATION);
+    hitSparks.forEach((e) => {
+      const t = (now - e.start) / HIT_SPARK_DURATION; // 0..1
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.fillStyle = '#FFD60A';
+      e.particles.forEach((p) => {
+        const px = e.x + Math.cos(p.angle) * p.dist * t;
+        const py = e.y + Math.sin(p.angle) * p.dist * t;
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(0.1, 2.5 * (1 - t)), 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    });
+  }
+
+  const FLOAT_TEXT_DURATION = 700; // ms
+
+  function spawnFloatText(x, y, text, color) {
+    floatTexts.push({ x, y, text, color, start: performance.now() });
+  }
+
+  function drawFloatTexts(now) {
+    floatTexts = floatTexts.filter((f) => now - f.start < FLOAT_TEXT_DURATION);
+    floatTexts.forEach((f) => {
+      const t = (now - f.start) / FLOAT_TEXT_DURATION; // 0..1
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.fillStyle = f.color;
+      ctx.font = '800 14px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // 一边上飘一边淡出
+      ctx.fillText(f.text, f.x, f.y - 22 * t);
+      ctx.restore();
+    });
+  }
+
   // ---------- 加速拖尾特效 ----------
   // 只要坦克处于加速状态且这一帧确实发生了位移，就在"车身移动前的位置"撒一颗
   // 会原地淡出的粒子，坦克跑过去后连续的粒子自然连成一条跟随移动方向的尾迹；
@@ -539,23 +855,26 @@
       ctx.font = '800 13px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const glyph = it.type === 'shield' ? '盾' : it.type === 'speed' ? '速' : it.type === 'triple' ? '三' : it.type === 'homing' ? '追' : '隐';
-      ctx.fillText(glyph, 0, 1);
+      ctx.fillText(ITEM_GLYPHS[it.type] || '?', 0, 1);
       ctx.restore();
     });
   }
 
   function draw() {
+    const now = performance.now();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#1B4B43';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     drawMaze();
     drawItems();
-    drawTrails(performance.now());
-    tanks.forEach(drawTank);
+    drawTrails(now);
+    tanks.forEach((t) => drawTank(t, now));
     bullets.forEach(drawBullet);
-    drawExplosions(performance.now());
-    drawShieldBreaks(performance.now());
+    drawExplosions(now);
+    drawShieldBreaks(now);
+    drawSpawnBlocks(now);
+    drawHitSparks(now);
+    drawFloatTexts(now);
   }
 
   // ---------- 键盘输入 ----------

@@ -6,17 +6,25 @@ const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const physics = require('./physics');
+const { pickSpawnCells } = require('./spawn');
 
 // ---------- 常量配置 ----------
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 
-const COLS = 12;
-const ROWS = 8;
 const CELL = 80;
 const WALL_THICK = 10;
-const WORLD_W = COLS * CELL; // 960
-const WORLD_H = ROWS * CELL; // 640
+
+// ---------- 地图尺寸 ----------
+// 房间级设置：房主在大厅里选择，开局时按当前档位生成迷宫。
+// 三档统一保持 3:2 的宽高比（720×480 / 960×640 / 1200×800），
+// 客户端画布随 worldW/worldH 自适应缩放时宽高比不会跳变。
+const MAP_PRESETS = {
+  small: { cols: 9, rows: 6 },
+  medium: { cols: 12, rows: 8 },
+  large: { cols: 15, rows: 10 },
+};
+const DEFAULT_MAP_SIZE = 'medium';
 
 const TANK_RADIUS = 15;
 const TANK_SPEED = 100;       // 前进 px/s
@@ -43,11 +51,27 @@ const BULLET_SUBSTEPS = Math.max(1, Math.ceil((BULLET_SPEED * DT) / BULLET_MAX_S
 const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
 const WIN_SCORE = 5;
 
-const PLAYER_COLORS = ['#E63946', '#3A86FF', '#FFD60A', '#06D6A0'];
-const MAX_PLAYERS = 4;
+// ---------- 血量机制 ----------
+// 房间级设置：每回合开局把所有人血量补满，每发子弹固定造成 1 点伤害。
+// 房主在大厅里可以自由设置 1–20 点；1 点即等同于旧版的一击必杀。
+const DEFAULT_MAX_HP = 3;
+const MIN_MAX_HP = 1;
+const MAX_MAX_HP = 20;
+const BULLET_DAMAGE = 1;
+// 维修包道具：拾取后回 1 点，不超过房间的血量上限；满血时仍然会拾取，但回血为 0、道具消失。
+const REPAIR_HEAL = 1;
+
+// 色板长度必须 >= MAX_PLAYERS，否则房间没满就可能出现两人同色。
+const PLAYER_COLORS = ['#E63946', '#3A86FF', '#FFD60A', '#06D6A0', '#FF8A3D', '#C77DFF', '#FF5DA2'];
+const MAX_PLAYERS = 7;
+
+// 出生保护：每回合开局给所有玩家 3 秒无敌，期间子弹被吸收、不掉血；
+// 一旦开火立即解除（避免"守在别人出生点旁边、靠无敌白嫖击杀"）。
+const SPAWN_PROTECT_TIME = 3;
 
 // ---------- 道具系统 ----------
-const ITEM_TYPES = ['shield', 'speed', 'triple', 'homing', 'invisible'];
+// repair 是血量机制配套的回血道具（维修包），其余 5 种是原有的增益道具。
+const ITEM_TYPES = ['shield', 'speed', 'triple', 'homing', 'invisible', 'repair'];
 const ITEM_SPAWN_INTERVAL = 15; // 秒，场上无论有多少道具，每隔这么久固定刷新一个新的
 const ITEM_RADIUS = 14; // 拾取判定半径（视觉半径同用这个）
 const SPEED_BOOST_DURATION = 6; // 秒
@@ -56,12 +80,8 @@ const TRIPLE_SPREAD_RAD = (12 * Math.PI) / 180; // 三连发扇形半张角
 const HOMING_TURN_RATE = 3; // rad/s，追踪弹每秒最多能修正的转向角速度
 const INVISIBLE_DURATION = 8; // 秒，隐身持续时间
 
-const SPAWN_CELLS = [
-  { r: 0, c: 0 },
-  { r: ROWS - 1, c: COLS - 1 },
-  { r: 0, c: COLS - 1 },
-  { r: ROWS - 1, c: 0 },
-];
+// 出生点不再固定四角：每回合由 spawn.js 在全图格心里随机抽取互不重复的位置，
+// 具体规则（只要求不同格、随机朝向）见 startRound 与 spawn.js 的注释。
 
 // ---------- 房间存储 ----------
 /** @type {Map<string, Room>} */
@@ -87,11 +107,11 @@ function makeId() {
 // 墙体都生成在格子的边界上（见 generateMaze），格子中心永远是空地，不用再做碰撞检测。
 // 尽量避开已经放了道具的格子，避免两个道具重叠在同一个点；
 // 格子数量有限，找不到空位时就放弃这次尝试，等下一轮 15 秒再刷。
-function pickRandomItemCell(occupiedCells) {
+function pickRandomItemCell(occupiedCells, cols, rows) {
   const maxTries = 20;
   for (let i = 0; i < maxTries; i++) {
-    const r = Math.floor(Math.random() * ROWS);
-    const c = Math.floor(Math.random() * COLS);
+    const r = Math.floor(Math.random() * rows);
+    const c = Math.floor(Math.random() * cols);
     const key = `${r},${c}`;
     if (!occupiedCells.has(key)) {
       return { r, c, x: c * CELL + CELL / 2, y: r * CELL + CELL / 2 };
@@ -101,19 +121,22 @@ function pickRandomItemCell(occupiedCells) {
 }
 
 // ---------- 迷宫生成 ----------
-// wallsV[r][c] = 第 c 列和第 c+1 列之间(在第 r 行)是否有墙, c: 0..COLS-2
-// wallsH[r][c] = 第 r 行和第 r+1 行之间(在第 c 列)是否有墙, r: 0..ROWS-2
-function generateMaze() {
-  const wallsV = Array.from({ length: ROWS }, () => Array(COLS - 1).fill(true));
-  const wallsH = Array.from({ length: ROWS - 1 }, () => Array(COLS).fill(true));
-  const visited = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+// wallsV[r][c] = 第 c 列和第 c+1 列之间(在第 r 行)是否有墙, c: 0..cols-2
+// wallsH[r][c] = 第 r 行和第 r+1 行之间(在第 c 列)是否有墙, r: 0..rows-2
+// 行列数由本局房间选择的地图档位决定，世界尺寸也随之变化。
+function generateMaze(cols, rows) {
+  const worldW = cols * CELL;
+  const worldH = rows * CELL;
+  const wallsV = Array.from({ length: rows }, () => Array(cols - 1).fill(true));
+  const wallsH = Array.from({ length: rows - 1 }, () => Array(cols).fill(true));
+  const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
 
   function neighbors(r, c) {
     const list = [];
     if (r > 0) list.push([r - 1, c, 'H', r - 1, c]);
-    if (r < ROWS - 1) list.push([r + 1, c, 'H', r, c]);
+    if (r < rows - 1) list.push([r + 1, c, 'H', r, c]);
     if (c > 0) list.push([r, c - 1, 'V', r, c - 1]);
-    if (c < COLS - 1) list.push([r, c + 1, 'V', r, c]);
+    if (c < cols - 1) list.push([r, c + 1, 'V', r, c]);
     return list;
   }
 
@@ -143,31 +166,25 @@ function generateMaze() {
   }
 
   // 打通一些额外的墙，制造环路，避免纯树形死胡同太多
-  const extraRemovals = Math.floor(COLS * ROWS * 0.12);
+  const extraRemovals = Math.floor(cols * rows * 0.12);
   for (let i = 0; i < extraRemovals; i++) {
     if (Math.random() < 0.5) {
-      const r = Math.floor(Math.random() * ROWS);
-      const c = Math.floor(Math.random() * (COLS - 1));
+      const r = Math.floor(Math.random() * rows);
+      const c = Math.floor(Math.random() * (cols - 1));
       wallsV[r][c] = false;
     } else {
-      const r = Math.floor(Math.random() * (ROWS - 1));
-      const c = Math.floor(Math.random() * COLS);
+      const r = Math.floor(Math.random() * (rows - 1));
+      const c = Math.floor(Math.random() * cols);
       wallsH[r][c] = false;
     }
-  }
-
-  // 保证出生角落附近至少有一点开阔空间（去掉出生格相邻的一条墙，防止被困死）
-  for (const { r, c } of SPAWN_CELLS) {
-    if (c < COLS - 1) wallsV[r][c] = false;
-    else if (c > 0) wallsV[r][c - 1] = false;
   }
 
   // 转换为矩形墙体列表，用于碰撞检测
   const rects = [];
   const OVERLAP = WALL_THICK / 2;
 
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS - 1; c++) {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols - 1; c++) {
       if (wallsV[r][c]) {
         rects.push({
           cx: (c + 1) * CELL,
@@ -178,8 +195,8 @@ function generateMaze() {
       }
     }
   }
-  for (let r = 0; r < ROWS - 1; r++) {
-    for (let c = 0; c < COLS; c++) {
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols; c++) {
       if (wallsH[r][c]) {
         rects.push({
           cx: c * CELL + CELL / 2,
@@ -192,10 +209,10 @@ function generateMaze() {
   }
 
   // 外边界
-  rects.push({ cx: WORLD_W / 2, cy: 0, hw: WORLD_W / 2 + WALL_THICK, hh: WALL_THICK / 2 });
-  rects.push({ cx: WORLD_W / 2, cy: WORLD_H, hw: WORLD_W / 2 + WALL_THICK, hh: WALL_THICK / 2 });
-  rects.push({ cx: 0, cy: WORLD_H / 2, hw: WALL_THICK / 2, hh: WORLD_H / 2 + WALL_THICK });
-  rects.push({ cx: WORLD_W, cy: WORLD_H / 2, hw: WALL_THICK / 2, hh: WORLD_H / 2 + WALL_THICK });
+  rects.push({ cx: worldW / 2, cy: 0, hw: worldW / 2 + WALL_THICK, hh: WALL_THICK / 2 });
+  rects.push({ cx: worldW / 2, cy: worldH, hw: worldW / 2 + WALL_THICK, hh: WALL_THICK / 2 });
+  rects.push({ cx: 0, cy: worldH / 2, hw: WALL_THICK / 2, hh: worldH / 2 + WALL_THICK });
+  rects.push({ cx: worldW, cy: worldH / 2, hw: WALL_THICK / 2, hh: worldH / 2 + WALL_THICK });
 
   return { rects, wallsV, wallsH };
 }
@@ -222,6 +239,14 @@ class Room {
     this.items = []; // 场上道具：{ id, type, x, y }
     this.nextItemId = 1;
     this.itemSpawnAcc = 0; // 距离上次刷新道具经过的秒数，累计到 ITEM_SPAWN_INTERVAL 就刷一个
+    // 地图大小与初始血量都是房间级设置：房主在大厅里改，每回合开始时按它生成迷宫/补满血量。
+    this.mapSize = DEFAULT_MAP_SIZE;
+    this.maxHp = DEFAULT_MAX_HP;
+    const preset = MAP_PRESETS[this.mapSize];
+    this.cols = preset.cols;
+    this.rows = preset.rows;
+    this.worldW = preset.cols * CELL;
+    this.worldH = preset.rows * CELL;
   }
 
   broadcast(msg) {
@@ -229,6 +254,18 @@ class Room {
     for (const p of this.players.values()) {
       if (p.ws.readyState === WebSocket.OPEN) p.ws.send(data);
     }
+  }
+
+  // 大厅状态统一从这里广播，房主变更、玩家进出、地图大小改动都走同一条消息，
+  // 避免以后新增房间设置时漏掉某个调用点导致客户端不同步。
+  broadcastRoom() {
+    this.broadcast({
+      type: 'room_update',
+      hostId: this.hostId,
+      players: this.playerList(),
+      mapSize: this.mapSize,
+      maxHp: this.maxHp,
+    });
   }
 
   playerList() {
@@ -243,7 +280,8 @@ class Room {
 
   assignColor() {
     const used = new Set([...this.players.values()].map((p) => p.color));
-    return PLAYER_COLORS.find((c) => !used.has(c)) || PLAYER_COLORS[0];
+    const free = PLAYER_COLORS.filter((c) => !used.has(c));
+    return free.length ? free[0] : '#F2FBF9'; // 色板用完只是兜底，正常情况下 7 人以内不会走到这里
   }
 
   startMatch() {
@@ -253,7 +291,14 @@ class Room {
   }
 
   startRound() {
-    this.maze = generateMaze();
+    // 每回合都按房间当前的地图大小重新生成，尺寸在世界坐标里是"真"的，
+    // 坦克碰撞、子弹反弹、边界 clamp 全部直接用这套尺寸，客户端只负责按 worldW/worldH 缩放显示。
+    const preset = MAP_PRESETS[this.mapSize];
+    this.cols = preset.cols;
+    this.rows = preset.rows;
+    this.worldW = preset.cols * CELL;
+    this.worldH = preset.rows * CELL;
+    this.maze = generateMaze(this.cols, this.rows);
     this.bullets = [];
     this.items = [];
     this.itemSpawnAcc = 0;
@@ -262,14 +307,22 @@ class Room {
       this.pendingTimeout = null;
     }
     this.pendingWinnerId = null;
-    const ids = [...this.players.keys()];
-    ids.forEach((id, i) => {
-      const p = this.players.get(id);
-      const cell = SPAWN_CELLS[i % SPAWN_CELLS.length];
-      p.x = cell.c * CELL + CELL / 2;
-      p.y = cell.r * CELL + CELL / 2;
-      p.angle = Math.atan2(WORLD_H / 2 - p.y, WORLD_W / 2 - p.x);
+    // 出生点每回合重新随机，范围覆盖整张地图的所有格心（见 spawn.js）。
+    // 当前规则只要求不和其他玩家落在同一格，7 人以内任意人数都放得下；
+    // 朝向也是完全随机，出生后往哪边开由玩家自己决定。
+    const spawns = pickSpawnCells({
+      cols: this.cols,
+      rows: this.rows,
+      cell: CELL,
+      count: this.players.size,
+    });
+    [...this.players.values()].forEach((p, i) => {
+      const spot = spawns[i];
+      p.x = spot.x;
+      p.y = spot.y;
+      p.angle = Math.random() * Math.PI * 2;
       p.alive = true;
+      p.hp = this.maxHp; // 每回合开局满血，回合内只会因中弹/维修包变化
       p.cooldown = 0;
       p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
       p.shield = false;
@@ -277,14 +330,18 @@ class Room {
       p.tripleReady = false;
       p.homingReady = false;
       p.invisibleRemaining = 0;
+      // 每回合开局都重新给满 3 秒出生保护，开火会提前结束（见 tick 的射击分支）
+      p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
     });
 
     this.broadcast({
       type: 'game_start',
-      maze: { wallsV: this.maze.wallsV, wallsH: this.maze.wallsH, cell: CELL, cols: COLS, rows: ROWS, wallThick: WALL_THICK },
+      maze: { wallsV: this.maze.wallsV, wallsH: this.maze.wallsH, cell: CELL, cols: this.cols, rows: this.rows, wallThick: WALL_THICK },
       players: this.playerList(),
-      worldW: WORLD_W,
-      worldH: WORLD_H,
+      worldW: this.worldW,
+      worldH: this.worldH,
+      mapSize: this.mapSize,
+      maxHp: this.maxHp,
     });
 
     if (!this.tickHandle) {
@@ -299,6 +356,11 @@ class Room {
     // --- 坦克移动 ---
     for (const p of alivePlayers) {
       const input = p.input;
+
+      // 出生保护：只按时间递减；开火会立即清零（见下面的射击分支），所以无敌可能在 3 秒前结束
+      if (p.spawnProtectRemaining > 0) {
+        p.spawnProtectRemaining = Math.max(0, p.spawnProtectRemaining - DT);
+      }
 
       // 加速道具：剩余时间在这里统一倒计时，倒计时期间移动/转向速度按倍率放大
       if (p.speedBoostRemaining > 0) {
@@ -356,6 +418,8 @@ class Room {
         if (useTriple) p.tripleReady = false;
         if (useHoming) p.homingReady = false;
         p.cooldown = SHOOT_COOLDOWN;
+        // 开火即解除出生保护：这一发打出去的同时无敌消失，不给"贴脸无敌期白嫖"留空间
+        p.spawnProtectRemaining = 0;
       }
     }
 
@@ -370,11 +434,14 @@ class Room {
     if (this.itemSpawnAcc >= ITEM_SPAWN_INTERVAL) {
       this.itemSpawnAcc -= ITEM_SPAWN_INTERVAL;
       const occupied = new Set(this.items.map((it) => `${it.cellR},${it.cellC}`));
-      const cell = pickRandomItemCell(occupied);
+      const cell = pickRandomItemCell(occupied, this.cols, this.rows);
       if (cell) {
+        // 1 点血模式下一发就淘汰，血量不是 0 就是满的，维修包永远回不了血，
+        // 直接从刷新池里去掉，避免地图上出现没有意义的道具。
+        const pool = this.maxHp > 1 ? ITEM_TYPES : ITEM_TYPES.filter((t) => t !== 'repair');
         this.items.push({
           id: this.nextItemId++,
-          type: ITEM_TYPES[Math.floor(Math.random() * ITEM_TYPES.length)],
+          type: pool[Math.floor(Math.random() * pool.length)],
           x: cell.x,
           y: cell.y,
           cellR: cell.r,
@@ -401,12 +468,15 @@ class Room {
           }
         }
         if (takenBy) {
+          const hpBefore = takenBy.hp;
           if (it.type === 'shield') takenBy.shield = true;
           else if (it.type === 'speed') takenBy.speedBoostRemaining = SPEED_BOOST_DURATION;
           else if (it.type === 'triple') { takenBy.tripleReady = true; takenBy.homingReady = false; }
           else if (it.type === 'homing') { takenBy.homingReady = true; takenBy.tripleReady = false; }
           else if (it.type === 'invisible') takenBy.invisibleRemaining = INVISIBLE_DURATION;
-          pickups.push({ playerId: takenBy.id, type: it.type, x: it.x, y: it.y });
+          else if (it.type === 'repair') takenBy.hp = Math.min(this.maxHp, takenBy.hp + REPAIR_HEAL);
+          // heal 是这次拾取实际回复的血量：满血捡维修包时为 0，客户端据此决定要不要飘 +1
+          pickups.push({ playerId: takenBy.id, type: it.type, x: it.x, y: it.y, heal: takenBy.hp - hpBefore });
         } else {
           remainingItems.push(it);
         }
@@ -422,6 +492,8 @@ class Room {
     // 只取最早接触点、按矩形面的法线反射（法线只可能是四个面之一，
     // 旋转后的墙也适用），并且能在一次调用里处理连续多次反弹。子步本身保证坦克命中判定的粒度。
     const survivingBullets = [];
+    const spawnBlocks = []; // 本帧被出生保护挡下的子弹位置，循环结束后统一广播
+    const damageHits = [];  // 本帧真正造成伤害的命中，循环结束后统一广播给客户端做反馈
     for (const b of this.bullets) {
       b.age += DT;
 
@@ -472,12 +544,32 @@ class Room {
           const ddx = b.x - p.x;
           const ddy = b.y - p.y;
           if (ddx * ddx + ddy * ddy < (BULLET_RADIUS + TANK_RADIUS) * (BULLET_RADIUS + TANK_RADIUS)) {
+            if (p.spawnProtectRemaining > 0) {
+              // 出生保护：子弹被吸收（不穿透），也不消耗道具护盾；
+              // 记下命中位置，稍后广播给客户端播放格挡火花。
+              spawnBlocks.push({ x: b.x, y: b.y, ownerId: p.id });
+              dead = true;
+              break;
+            }
             if (p.shield) {
-              // 护盾挡下这一发：护盾消耗掉，子弹消失，但坦克本身不算阵亡
+              // 护盾挡下这一发：整发伤害被免疫，护盾消耗掉，子弹消失，但坦克本身不掉血
               p.shield = false;
             } else {
-              p.alive = false;
-              p.lastHitBy = b.owner;
+              // 固定 1 点伤害：血量归零才真正阵亡，否则继续以残血留在场上。
+              // 命中信息记下来，稍后广播，客户端据此播放受击火花、掉血数字和车身闪白。
+              p.hp = Math.max(0, p.hp - BULLET_DAMAGE);
+              if (p.hp <= 0) {
+                p.alive = false;
+                p.lastHitBy = b.owner;
+              }
+              damageHits.push({
+                playerId: p.id,
+                by: b.owner,
+                x: b.x,
+                y: b.y,
+                hp: p.hp,
+                dead: !p.alive,
+              });
             }
             dead = true;
             break;
@@ -489,6 +581,13 @@ class Room {
     }
     this.bullets = survivingBullets;
 
+    if (spawnBlocks.length > 0) {
+      this.broadcast({ type: 'spawn_block', blocks: spawnBlocks });
+    }
+    if (damageHits.length > 0) {
+      this.broadcast({ type: 'damage', hits: damageHits });
+    }
+
     // --- 广播状态 ---
     this.broadcast({
       type: 'state',
@@ -498,6 +597,7 @@ class Room {
         y: p.y,
         angle: p.angle,
         alive: p.alive,
+        hp: p.hp,
         color: p.color,
         name: p.name,
         shield: p.shield,
@@ -505,6 +605,9 @@ class Room {
         tripleReady: p.tripleReady,
         homingReady: p.homingReady,
         invisible: p.invisibleRemaining > 0,
+        // 出生保护剩余秒数（保留 1 位小数）：客户端用它画光环进度弧，
+        // 0 表示没有保护；和道具护盾的 shield 字段完全独立。
+        spawnProtect: Math.round(p.spawnProtectRemaining * 10) / 10,
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
       items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
@@ -546,8 +649,8 @@ class Room {
         return; // 该轴方向被阻挡，放弃这次移动
       }
     }
-    p.x = clamp(nx, TANK_RADIUS, WORLD_W - TANK_RADIUS);
-    p.y = clamp(ny, TANK_RADIUS, WORLD_H - TANK_RADIUS);
+    p.x = clamp(nx, TANK_RADIUS, this.worldW - TANK_RADIUS);
+    p.y = clamp(ny, TANK_RADIUS, this.worldH - TANK_RADIUS);
   }
 
   // 坦克间的推挤碰撞：两两检测圆形重叠，重叠时沿两车圆心连线方向各退半步。
@@ -643,7 +746,12 @@ const server = http.createServer((req, res) => {
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    // 页面/脚本/样式都是每次请求现读磁盘，开发期改动频繁；禁止浏览器缓存，
+    // 避免玩家刷新后仍在跑旧版 client.js / style.css（血量颜色等修复不生效）。
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': 'no-store',
+    });
     res.end(data);
   });
 });
@@ -671,14 +779,15 @@ wss.on('connection', (ws) => {
       playerId = makeId();
       const player = {
         id: playerId, name, ws, color: room.assignColor(),
-        score: 0, x: 0, y: 0, angle: 0, alive: true, cooldown: 0,
+        score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
         input: { forward: false, backward: false, left: false, right: false, shoot: false },
         shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
+        spawnProtectRemaining: 0,
       };
       room.players.set(playerId, player);
       room.hostId = playerId;
       currentRoom = room;
-      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList() }));
+      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList(), mapSize: room.mapSize, maxHp: room.maxHp }));
       return;
     }
 
@@ -690,7 +799,7 @@ wss.on('connection', (ws) => {
         return;
       }
       if (room.players.size >= MAX_PLAYERS) {
-        ws.send(JSON.stringify({ type: 'error', message: '房间已满（最多4人）' }));
+        ws.send(JSON.stringify({ type: 'error', message: `房间已满（最多${MAX_PLAYERS}人）` }));
         return;
       }
       if (room.state === 'playing' || room.state === 'round_pending') {
@@ -702,18 +811,69 @@ wss.on('connection', (ws) => {
       playerId = makeId();
       const player = {
         id: playerId, name, ws, color: room.assignColor(),
-        score: 0, x: 0, y: 0, angle: 0, alive: true, cooldown: 0,
+        score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
         input: { forward: false, backward: false, left: false, right: false, shoot: false },
         shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
+        spawnProtectRemaining: 0,
       };
       room.players.set(playerId, player);
       currentRoom = room;
-      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList() }));
-      room.broadcast({ type: 'room_update', hostId: room.hostId, players: room.playerList() });
+      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList(), mapSize: room.mapSize, maxHp: room.maxHp }));
+      room.broadcastRoom();
       return;
     }
 
     if (!currentRoom || !playerId) return;
+
+    if (msg.type === 'set_map_size') {
+      // 地图大小是房主专属设置，且只在大厅（尚未开局）时可改：
+      // 对局中改尺寸会让已经按旧尺寸生成的迷宫/出生点/子弹坐标对不上，必须拒绝。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改地图大小' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改地图大小' }));
+        return;
+      }
+      const size = String(msg.size || '');
+      // 用 hasOwnProperty 而不是直接取值，避免 'constructor' 之类的原型链 key 被当成合法档位
+      if (!Object.prototype.hasOwnProperty.call(MAP_PRESETS, size)) {
+        ws.send(JSON.stringify({ type: 'error', message: '无效的地图大小' }));
+        return;
+      }
+      if (currentRoom.mapSize !== size) {
+        currentRoom.mapSize = size;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_hp') {
+      // 初始血量同样是房主专属、且只在大厅可改：对局中改会让已经打掉的血量和上限对不上。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改初始血量' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改初始血量' }));
+        return;
+      }
+      const raw = msg.hp;
+      // 只接受数字或字符串：null/true/false 等如果直接走 Number() 会被悄悄转成 0/1，
+      // 必须在类型这一层就拒绝，后面的整数区间校验才有意义。
+      const validType = typeof raw === 'number' || typeof raw === 'string';
+      const hp = validType && String(raw).trim() !== '' ? Number(raw) : NaN;
+      if (!Number.isInteger(hp) || hp < MIN_MAX_HP || hp > MAX_MAX_HP) {
+        ws.send(JSON.stringify({ type: 'error', message: `初始血量必须是 ${MIN_MAX_HP}–${MAX_MAX_HP} 之间的整数` }));
+        return;
+      }
+      if (currentRoom.maxHp !== hp) {
+        currentRoom.maxHp = hp;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
 
     if (msg.type === 'start_game') {
       if (currentRoom.hostId !== playerId) return;
@@ -758,7 +918,7 @@ wss.on('connection', (ws) => {
       if (room.hostId === playerId) {
         room.hostId = [...room.players.keys()][0];
       }
-      room.broadcast({ type: 'room_update', hostId: room.hostId, players: room.playerList() });
+      room.broadcastRoom();
       if ((room.state === 'playing' || room.state === 'round_pending') && room.players.size < 2) {
         room.stopTicking();
         room.state = 'lobby';
@@ -775,7 +935,28 @@ function sanitizeName(name, fallbackNumber) {
   return n.length ? n : `玩家 ${fallbackNumber}`;
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`坦克大战服务器已启动: http://localhost:${PORT}`);
-  console.log('局域网内其他人可通过 http://<你的局域网IP>:' + PORT + ' 访问加入');
-});
+// 直接 `node server.js` 时才真正监听端口；被测试 require 时只导出 Room 等符号，
+// 这样 tests/room.test.js 可以不起网络、直接驱动房间逻辑做确定性测试。
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`坦克大战服务器已启动: http://localhost:${PORT}`);
+    console.log('局域网内其他人可通过 http://<你的局域网IP>:' + PORT + ' 访问加入');
+  });
+}
+
+module.exports = {
+  Room,
+  MAX_PLAYERS,
+  PLAYER_COLORS,
+  SPAWN_PROTECT_TIME,
+  MAP_PRESETS,
+  CELL,
+  TANK_RADIUS,
+  BULLET_RADIUS,
+  DEFAULT_MAX_HP,
+  MIN_MAX_HP,
+  MAX_MAX_HP,
+  BULLET_DAMAGE,
+  REPAIR_HEAL,
+  ITEM_TYPES,
+};
