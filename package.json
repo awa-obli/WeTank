@@ -4,7 +4,8 @@
   "description": "局域网联机坦克大战",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node tests/physics.test.js"
   },
   "dependencies": {
     "ws": "^8.16.0"

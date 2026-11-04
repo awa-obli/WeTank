@@ -5,9 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const physics = require('./physics');
 
 // ---------- 常量配置 ----------
 const PORT = process.env.PORT || 8080;
+const HOST = process.env.HOST || '0.0.0.0';
 
 const COLS = 12;
 const ROWS = 8;
@@ -33,11 +35,9 @@ const DT = 1 / TICK_RATE;
 const ROUND_RESTART_DELAY = 3000; // ms
 
 // 子弹每帧的位移(BULLET_SPEED*DT ≈ 10.7px)可能大于墙体厚度(WALL_THICK=10px)。
-// 如果只在整帧位移结束后检测一次碰撞，某些角度下子弹在一帧内就能"跳过"整面墙，
-// 全程都不会命中任何碰撞矩形，从而穿墙而过（小概率触发，往往还伴随卡进墙里抽动）。
-// 这里把每帧的位移拆成若干子步(substep)，每个子步的位移远小于墙体厚度，
-// 并在每个子步后都做一次碰撞检测，这样无论子弹朝什么角度飞行，
-// 都不可能在两次检测之间跨越一整面墙。
+// 现在墙体碰撞用的是"圆扫掠"连续检测（见 physics.js），沿子步的整段位移求
+// 最早接触点，本身就不会跨过墙体；这里的子步主要用于让子弹与坦克的命中判定
+// 保持细粒度，并限制单次解算的位移上限。
 const BULLET_MAX_STEP = 3; // 每个子步最大位移(px)，需明显小于 WALL_THICK
 const BULLET_SUBSTEPS = Math.max(1, Math.ceil((BULLET_SPEED * DT) / BULLET_MAX_STEP));
 const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
@@ -201,73 +201,8 @@ function generateMaze() {
 }
 
 // ---------- 碰撞辅助 ----------
-function circleRectOverlap(cx, cy, radius, rect) {
-  const closestX = clamp(cx, rect.cx - rect.hw, rect.cx + rect.hw);
-  const closestY = clamp(cy, rect.cy - rect.hh, rect.cy + rect.hh);
-  const dx = cx - closestX;
-  const dy = cy - closestY;
-  const dist2 = dx * dx + dy * dy;
-  if (dist2 < radius * radius) {
-    return { dx, dy, dist: Math.sqrt(dist2) };
-  }
-  return null;
-}
-
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
-}
-
-// 把子弹从墙体矩形中顶出来，并沿墙面法线反射速度。
-//
-// 之前的写法：用"圆心到矩形最近点"的距离方向作为反射法线。
-// 问题在于——这类墙体都是又薄又长的矩形，当子弹恰好擦过墙体的
-// 端点(墙段的头/尾)时，"最近点"会落在矩形的角上，此时 dx/dy 指向
-// 的是"角->圆心"的斜向量，而不是墙面真正的朝向。用这个斜向量做镜面
-// 反射，子弹就会被弹到一个跟墙面无关的诡异角度，看起来像是凭空"拐弯"了
-// ——且只在子弹恰好擦到墙端点的特定角度下才会触发，符合报告的现象。
-//
-// 改用 MTV(最小平移向量)方式：分别算出沿 X 轴、沿 Y 轴需要推开多少距离
-// 才能解除重叠，取更小的那一个作为解算轴。因为墙体是薄片状的，正确的
-// 分离轴几乎总是"厚度方向"那一轴，这样得到的法线永远是水平或竖直的，
-// 不会再出现斜着弹开的情况，反射角自然、可预测。
-function resolveBulletWallCollision(b, rect) {
-  const dx = b.x - rect.cx;
-  const dy = b.y - rect.cy;
-  const overlapX = rect.hw + BULLET_RADIUS - Math.abs(dx);
-  const overlapY = rect.hh + BULLET_RADIUS - Math.abs(dy);
-
-  // 推出方向不能用"子弹当前坐标相对墙心的符号"来判断：
-  // 当子弹在同一个子步内的位移 + 出生偏移恰好让它越过了墙的中心线时，
-  // 这个符号就反了——会把子弹继续往墙的另一侧推，直接推出墙外，也就是"穿墙"。
-  // 正确、稳定的做法是用子弹的运动方向来判断：不管它已经陷进墙里多深，
-  // 它一定是从"来的那一侧"钻进去的，所以永远沿着与速度方向相反的方向弹回去。
-  // 只有当该轴上速度恰好为0（沿墙面平移，理论上不该是解算轴）时才退回用位置符号兜底。
-  // 注意：overlapX/overlapY(= hw+radius-|dx| 或 |dy|)只有在"推出方向"与
-  // "子弹相对墙心位置的符号"一致时，才等于真正该移动的距离。
-  // 正常情况下子弹从墙外飞来，浅浅地陷入墙体，这两者是一致的，用增量式的
-  // `b.x += nx * overlapX` 没问题。
-  // 但如果子弹的出生点本身就贴着墙(坦克贴墙开火，出生偏移量比坦克到墙面
-  // 的距离还大)，子弹可能一出生就已经越过了墙体中心线——这时按速度方向
-  // 算出的推出方向 nx，和子弹当前位置相对墙心的符号正好相反，`Math.abs(dx)`
-  // 算出来的推出距离会明显偏小，一次推不出去；子弹留在墙里，下一次 guard
-  // 循环里方向又因为速度已被反射而翻转一次，如此反复几次，子弹就被
-  // "一步步顶"穿到了墙的另一侧，表现为直接穿墙。
-  // 改成直接计算目标绝对坐标(贴着墙面法线方向的边界)，不管陷入多深、
-  // 陷入方向和推出方向是否相反，都能一次到位推到正确的墙外侧；
-  // 且在原来"浅层重叠、方向一致"的正常场景下，两种写法结果完全相同。
-  let nx = 0, ny = 0;
-  if (overlapX < overlapY) {
-    nx = b.vx > 0 ? -1 : b.vx < 0 ? 1 : (dx < 0 ? -1 : 1);
-    b.x = rect.cx + nx * (rect.hw + BULLET_RADIUS);
-  } else {
-    ny = b.vy > 0 ? -1 : b.vy < 0 ? 1 : (dy < 0 ? -1 : 1);
-    b.y = rect.cy + ny * (rect.hh + BULLET_RADIUS);
-  }
-
-  // 沿法线反射速度向量（镜面反射公式）
-  const dot = b.vx * nx + b.vy * ny;
-  b.vx -= 2 * dot * nx;
-  b.vy -= 2 * dot * ny;
 }
 
 // ---------- 房间类 ----------
@@ -483,9 +418,9 @@ class Room {
     }
 
     // --- 子弹移动与碰撞 ---
-    // 把整帧位移拆成 BULLET_SUBSTEPS 个子步：每个子步只移动一小段距离，
-    // 移动后立刻检测碰撞，而不是等一整帧的位移都走完再检测一次。
-    // 这样即使子弹速度很快、墙又薄，也不会出现"两次检测之间整段穿过墙体"的情况。
+    // 每个子步调用 physics.stepBullet：它沿子步位移做"圆扫掠"连续检测，
+    // 只取最早接触点、按矩形面的法线反射（法线只可能是四个面之一，
+    // 旋转后的墙也适用），并且能在一次调用里处理连续多次反弹。子步本身保证坦克命中判定的粒度。
     const survivingBullets = [];
     for (const b of this.bullets) {
       b.age += DT;
@@ -524,22 +459,13 @@ class Room {
       let dead = b.age >= BULLET_LIFETIME;
 
       for (let s = 0; s < BULLET_SUBSTEPS && !dead; s++) {
-        b.x += b.vx * BULLET_SUB_DT;
-        b.y += b.vy * BULLET_SUB_DT;
-
-        let hitRect = null;
-        for (const rect of this.maze.rects) {
-          if (circleRectOverlap(b.x, b.y, BULLET_RADIUS, rect)) {
-            hitRect = rect;
-            break;
-          }
+        const step = physics.stepBullet(b, BULLET_RADIUS, BULLET_SUB_DT, this.maze.rects);
+        if (step.stuck) {
+          // 子弹卡死在墙体几何里（正常飞行不会出现，多见于极端出生位置），
+          // 直接移除，避免它从墙里穿出去。
+          dead = true;
+          break;
         }
-        if (hitRect) {
-          resolveBulletWallCollision(b, hitRect);
-          b.bounces += 1;
-        }
-
-        if (dead) break;
 
         for (const p of alivePlayers) {
           if (b.owner === p.id && b.age < BULLET_OWNER_GRACE) continue;
@@ -616,7 +542,7 @@ class Room {
     const nx = p.x + dx;
     const ny = p.y + dy;
     for (const rect of this.maze.rects) {
-      if (circleRectOverlap(nx, ny, TANK_RADIUS, rect)) {
+      if (physics.circleRectOverlap(nx, ny, TANK_RADIUS, rect)) {
         return; // 该轴方向被阻挡，放弃这次移动
       }
     }
@@ -849,7 +775,7 @@ function sanitizeName(name, fallbackNumber) {
   return n.length ? n : `玩家 ${fallbackNumber}`;
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`坦克大战服务器已启动: http://localhost:${PORT}`);
   console.log('局域网内其他人可通过 http://<你的局域网IP>:' + PORT + ' 访问加入');
 });
