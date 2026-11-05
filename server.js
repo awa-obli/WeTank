@@ -34,9 +34,18 @@ const TANK_ROT_SPEED = 4.0;   // rad/s
 const BULLET_RADIUS = 4;
 const BULLET_SPEED = 150;
 const BULLET_LIFETIME = 10; // 子弹存活时间(秒)，超过后自动消失，不再按反弹次数限制
-const MAX_BULLETS_PER_PLAYER = 5;
 const SHOOT_COOLDOWN = 0.25;
 const BULLET_OWNER_GRACE = 0.1; // 出生后一小段时间内不会打到自己
+
+// ---------- 弹药机制 ----------
+// 弹药是个人资源：每回合开局满 5 发，单发消耗 1 发，每 5 秒自动补 1 发，上限 5 发。
+// 弹药数量只私发给本人（tick 里的 ammo 消息），公共 state 里不带，别人看不到。
+// 有了弹药之后，"同屏存活子弹数"不再是必要的限制（否则会出现有弹却打不出去），
+// 旧版 MAX_BULLETS_PER_PLAYER 上限已移除。
+const AMMO_MAX = 5;
+const AMMO_REGEN_INTERVAL = 5; // 秒，每补 1 发所需的装填时间
+const AMMO_COST_NORMAL = 1;
+const AMMO_COST_TRIPLE = 3; // 三连发一次打出 3 颗子弹，按 3 发弹药结算
 
 const TICK_RATE = 30;
 const DT = 1 / TICK_RATE;
@@ -330,6 +339,9 @@ class Room {
       p.tripleReady = false;
       p.homingReady = false;
       p.invisibleRemaining = 0;
+      // 弹药和血量一样每回合重置：开局满弹，装填进度清零
+      p.ammo = AMMO_MAX;
+      p.ammoReloadAcc = 0;
       // 每回合开局都重新给满 3 秒出生保护，开火会提前结束（见 tick 的射击分支）
       p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
     });
@@ -373,6 +385,28 @@ class Room {
         p.invisibleRemaining = Math.max(0, p.invisibleRemaining - DT);
       }
 
+      // 弹药自动装填：只在正常对局中、且弹药未满时计时，每满 5 秒补 1 发。
+      // 满弹时进度归零（不囤积），这样打空后的第一发永远要等满 5 秒，
+      // 不会出现"满弹挂机很久、开一枪立刻又回满"的爆发优势。
+      // 阵亡后不在 alivePlayers 里，自然停止回复；残局观察期（round_pending）也冻结进度。
+      if (this.state === 'playing') {
+        if (p.ammo < AMMO_MAX) {
+          p.ammoReloadAcc += DT;
+          // 30Hz 下 5 秒 = 150 个 DT，浮点累加会得到 4.999999999999992，
+          // 用极小容差兜住，保证正好第 150 个 tick 就补弹，而不是拖到 151 个。
+          if (p.ammoReloadAcc >= AMMO_REGEN_INTERVAL - 1e-6) {
+            p.ammoReloadAcc -= AMMO_REGEN_INTERVAL;
+            p.ammo += 1;
+            if (p.ammo >= AMMO_MAX) {
+              p.ammo = AMMO_MAX;
+              p.ammoReloadAcc = 0;
+            }
+          }
+        } else {
+          p.ammoReloadAcc = 0;
+        }
+      }
+
       let rot = 0;
       if (input.left) rot -= TANK_ROT_SPEED * speedMult * DT;
       if (input.right) rot += TANK_ROT_SPEED * speedMult * DT;
@@ -389,14 +423,17 @@ class Room {
         this.moveTankAxis(p, 0, dy);
       }
 
-      // 射击
+      // 射击：冷却结束 + 弹药足够才打得出去。
+      // 普通单发花 1 发；三连发一次打出 3 颗子弹、按 3 发弹药结算，
+      // 弹药不足 3 发时整发打不出去（三连发道具保持就绪，等装填够了再用），
+      // 避免"手里有 1 发却被迫打一发单发、把三连发道具浪费掉"的歧义。
       p.cooldown = Math.max(0, p.cooldown - DT);
-      const aliveBulletCount = this.bullets.filter((b) => b.owner === p.id).length;
-      if (input.shoot && p.cooldown <= 0 && aliveBulletCount < MAX_BULLETS_PER_PLAYER) {
-        // 三连发道具：拾取后下一次射击打出扇形三发子弹，用一次就消耗掉；
-        // 不是"充能次数"，触发一次后立即回落为普通单发。
-        const useTriple = p.tripleReady;
-        const useHoming = p.homingReady;
+      // 三连发道具：拾取后下一次射击打出扇形三发子弹，用一次就消耗掉；
+      // 不是"充能次数"，触发一次后立即回落为普通单发。
+      const useTriple = p.tripleReady;
+      const useHoming = p.homingReady;
+      const ammoCost = useTriple ? AMMO_COST_TRIPLE : AMMO_COST_NORMAL;
+      if (input.shoot && p.cooldown <= 0 && p.ammo >= ammoCost) {
         const angles = useTriple
           ? [p.angle - TRIPLE_SPREAD_RAD, p.angle, p.angle + TRIPLE_SPREAD_RAD]
           : [p.angle];
@@ -415,6 +452,7 @@ class Room {
             homing: useHoming,
           });
         }
+        p.ammo -= ammoCost;
         if (useTriple) p.tripleReady = false;
         if (useHoming) p.homingReady = false;
         p.cooldown = SHOOT_COOLDOWN;
@@ -586,6 +624,22 @@ class Room {
     }
     if (damageHits.length > 0) {
       this.broadcast({ type: 'damage', hits: damageHits });
+    }
+
+    // --- 私发弹药 ---
+    // 弹药是个人资源，绝不放进公共 state：每个玩家只收到自己那一份，
+    // "只能看到自己的弹药"是协议层面的保证，而不是靠客户端自觉隐藏。
+    // 放在 state 之前发送，客户端处理 state 触发重绘时拿到的就是最新弹药。
+    for (const p of this.players.values()) {
+      if (!p.ws || p.ws.readyState !== WebSocket.OPEN) continue;
+      p.ws.send(JSON.stringify({
+        type: 'ammo',
+        ammo: p.ammo,
+        max: AMMO_MAX,
+        reload: p.ammo < AMMO_MAX
+          ? Math.round((p.ammoReloadAcc / AMMO_REGEN_INTERVAL) * 100) / 100
+          : 0,
+      }));
     }
 
     // --- 广播状态 ---
@@ -783,6 +837,7 @@ wss.on('connection', (ws) => {
         input: { forward: false, backward: false, left: false, right: false, shoot: false },
         shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
         spawnProtectRemaining: 0,
+        ammo: AMMO_MAX, ammoReloadAcc: 0,
       };
       room.players.set(playerId, player);
       room.hostId = playerId;
@@ -815,6 +870,7 @@ wss.on('connection', (ws) => {
         input: { forward: false, backward: false, left: false, right: false, shoot: false },
         shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
         spawnProtectRemaining: 0,
+        ammo: AMMO_MAX, ammoReloadAcc: 0,
       };
       room.players.set(playerId, player);
       currentRoom = room;
@@ -953,6 +1009,8 @@ module.exports = {
   CELL,
   TANK_RADIUS,
   BULLET_RADIUS,
+  AMMO_MAX,
+  AMMO_REGEN_INTERVAL,
   DEFAULT_MAX_HP,
   MIN_MAX_HP,
   MAX_MAX_HP,

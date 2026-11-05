@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/physics.test.js && node tests/spawn.test.js && node tests/room.test.js && node tests/hp.test.js",
+    "test": "node tests/physics.test.js && node tests/spawn.test.js && node tests/room.test.js && node tests/hp.test.js && node tests/ammo.test.js",
     "test:e2e": "node tests/smoke-ws.js && node tests/map-size.test.js && node tests/capacity.test.js && node tests/hp-room.test.js"
   },
   "dependencies": {

@@ -72,6 +72,12 @@
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
   const SPAWN_PROTECT_TIME = 3; // 与服务端 SPAWN_PROTECT_TIME 一致，用于把剩余秒数换算成进度弧比例
+  const AMMO_MAX = 5; // 与服务端 AMMO_MAX 一致，仅作为 ammo 消息到达前的初始显示值
+  // 弹药是个人资源，服务端只私发本人的数量；这里只会存自己这一份，
+  // 所以其他坦克身上根本没有弹药数据，界面上也无从显示。
+  let myAmmo = AMMO_MAX;
+  let myAmmoMax = AMMO_MAX;
+  let myAmmoReload = 0; // 当前这一发的装填进度 0..1，满弹时为 0
   let prevAlive = {};  // id -> 上一帧是否存活，用来检测"刚刚死亡"这一瞬间
   let lastHp = {};     // id -> 最近一次收到的血量，用于 HUD 在回合结束/重开时仍显示正确数值
   let hitFlash = {};   // id -> 最近一次受击的时间戳，用来在车身上闪一层白
@@ -184,9 +190,21 @@
         prevAlive = {};
         prevShield = {};
         prevPos = {};
+        // 新回合满弹：先按本地默认值重置，服务端第一帧 ammo 消息会立刻覆盖
+        myAmmo = AMMO_MAX;
+        myAmmoMax = AMMO_MAX;
+        myAmmoReload = 0;
         overlayRound.classList.add('hidden');
         renderHud();
         showView('game');
+        break;
+
+      case 'ammo':
+        // 服务端每 tick 只私发本人的弹药，不触发重绘——
+        // 紧接着到达的 state 消息会统一 draw()，那时用的就是这里刚更新的值。
+        myAmmo = msg.ammo;
+        myAmmoMax = msg.max || AMMO_MAX;
+        myAmmoReload = msg.reload || 0;
         break;
 
       case 'state':
@@ -622,6 +640,68 @@
   }
 
 
+  // ---------- 车旁弹药指示器（只有自己看得到） ----------
+  // 服务端只把弹药私发给本人，其他坦克没有弹药数据，所以这里只画 myId 这一辆。
+  // 位置默认贴在车身右侧；右边放不下就翻到左侧，再 clamp 进画布，避免贴边被裁。
+  const AMMO_PIP_W = 4;
+  const AMMO_PIP_H = 9;
+  const AMMO_PIP_GAP = 2;
+  const AMMO_BADGE_PAD_X = 6;
+  const AMMO_BADGE_H = 25; // 上内边距 + 弹条高 + 进度条 + 下内边距
+
+  function drawAmmoBadge(now) {
+    const self = tanks.find((t) => t.id === myId);
+    if (!self || !self.alive) return;
+
+    const max = Math.max(1, myAmmoMax);
+    const ammo = clampNum(myAmmo, 0, max);
+    const empty = ammo <= 0;
+    const contentW = max * AMMO_PIP_W + (max - 1) * AMMO_PIP_GAP;
+    const badgeW = contentW + AMMO_BADGE_PAD_X * 2;
+
+    let bx = self.x + TANK_RADIUS + 12;
+    if (bx + badgeW > canvas.width - LABEL_PAD) {
+      bx = self.x - TANK_RADIUS - 12 - badgeW;
+    }
+    bx = clampNum(bx, LABEL_PAD, canvas.width - badgeW - LABEL_PAD);
+    const by = clampNum(self.y - AMMO_BADGE_H / 2, LABEL_PAD, canvas.height - AMMO_BADGE_H - LABEL_PAD);
+
+    ctx.save();
+    if (self.invisible) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA; // 自己隐身时角标跟着半透明
+    // 空弹时整体红色脉冲：比静态红色更醒目，又不至于像死亡特效那样吵闹
+    if (empty) ctx.globalAlpha *= 0.55 + 0.45 * Math.abs(Math.sin(now / 220));
+
+    ctx.fillStyle = 'rgba(6, 17, 15, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, badgeW, AMMO_BADGE_H, 5);
+    ctx.fill();
+    ctx.strokeStyle = empty ? '#E63946' : 'rgba(242, 251, 249, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // 弹条：实心 = 还能打，空心 = 已经打掉
+    const pipY = by + 5;
+    for (let i = 0; i < max; i++) {
+      const px = bx + AMMO_BADGE_PAD_X + i * (AMMO_PIP_W + AMMO_PIP_GAP);
+      ctx.fillStyle = i < ammo ? '#FFD60A' : 'rgba(242, 251, 249, 0.14)';
+      ctx.beginPath();
+      ctx.roundRect(px, pipY, AMMO_PIP_W, AMMO_PIP_H, 1.5);
+      ctx.fill();
+    }
+
+    // 装填进度：只显示"当前这一发"的进度条，满弹时为空
+    const barX = bx + AMMO_BADGE_PAD_X;
+    const barW = badgeW - AMMO_BADGE_PAD_X * 2;
+    const barY = by + 19;
+    ctx.fillStyle = 'rgba(242, 251, 249, 0.14)';
+    ctx.fillRect(barX, barY, barW, 2.5);
+    if (ammo < max && myAmmoReload > 0) {
+      ctx.fillStyle = '#FFD60A';
+      ctx.fillRect(barX, barY, barW * clampNum(myAmmoReload, 0, 1), 2.5);
+    }
+    ctx.restore();
+  }
+
   function drawBullet(b) {
     ctx.beginPath();
     ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
@@ -870,6 +950,7 @@
     drawTrails(now);
     tanks.forEach((t) => drawTank(t, now));
     bullets.forEach(drawBullet);
+    drawAmmoBadge(now); // 画在子弹之上，贴边时也不会被飞过的子弹盖住
     drawExplosions(now);
     drawShieldBreaks(now);
     drawSpawnBlocks(now);
