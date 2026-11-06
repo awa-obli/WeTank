@@ -10,41 +10,90 @@
 </head>
 <body>
 
-<!-- ============ 首屏：创建 / 加入 ============ -->
+<!-- ============ 首屏：开始游戏 ============ -->
 <section id="view-landing" class="view">
   <div class="landing-wrap">
     <div class="brand">
       <div class="brand-badge">◪</div>
       <h1>坦克动荡</h1>
     </div>
+    <p class="landing-sub">局域网联机</p>
 
-    <div class="card-row">
-      <div class="panel">
-        <h2>创建房间</h2>
-        <label class="field">
-          <span>你的昵称</span>
-          <input id="create-name" maxlength="12" placeholder="指挥官" autocomplete="off" />
-        </label>
-        <button id="btn-create" class="btn btn-primary">创建房间</button>
-      </div>
+    <label class="field nickname-field">
+      <span>你的昵称</span>
+      <input id="nickname" maxlength="12" placeholder="指挥官" autocomplete="off" />
+    </label>
 
-      <div class="panel">
-        <h2>加入房间</h2>
-        <label class="field">
-          <span>你的昵称</span>
-          <input id="join-name" maxlength="12" placeholder="指挥官" autocomplete="off" />
-        </label>
-        <label class="field">
-          <span>房间码</span>
-          <input id="join-code" maxlength="4" placeholder="XXXX" autocomplete="off" style="text-transform:uppercase; letter-spacing:.2em; font-family:'JetBrains Mono', monospace;" />
-        </label>
-        <button id="btn-join" class="btn btn-secondary">加入房间</button>
-      </div>
-    </div>
+    <button id="btn-enter-rooms" class="btn btn-primary btn-start-game">开始游戏</button>
 
     <p id="landing-error" class="error-msg"></p>
   </div>
 </section>
+
+<!-- ============ 房间列表 ============ -->
+<section id="view-rooms" class="view hidden">
+  <div class="rooms-wrap">
+    <header class="rooms-header">
+      <div class="rooms-heading">
+        <h1>房间列表</h1>
+        <p id="rooms-count" class="rooms-count">正在获取房间…</p>
+      </div>
+      <span id="rooms-nickname" class="nickname-chip"></span>
+    </header>
+
+    <p id="rooms-error" class="error-msg"></p>
+    <div id="rooms-list" class="room-list"></div>
+    <div id="rooms-empty" class="rooms-empty hidden">
+      <p>暂时还没有房间</p>
+      <p class="rooms-empty-hint">点击右下角「创建房间」开一局吧。</p>
+    </div>
+  </div>
+
+  <div class="rooms-actions">
+    <button id="btn-back-home" class="link-btn rooms-back" type="button">← 返回主页</button>
+    <button id="btn-create-room" class="btn btn-primary" type="button">创建房间</button>
+    <button id="btn-join-room" class="btn btn-secondary" type="button">加入房间</button>
+  </div>
+</section>
+
+<!-- ============ 创建 / 加入弹窗 ============ -->
+<div id="modal-create" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-create-title">
+  <div class="modal-card">
+    <h2 id="modal-create-title">创建房间</h2>
+    <p class="modal-hint">房间名会显示在房间列表里。</p>
+    <form id="form-create">
+      <label class="field">
+        <span>房间名</span>
+        <input id="create-room-name" maxlength="20" placeholder="1–20 个字" autocomplete="off" />
+      </label>
+      <p id="create-error" class="error-msg"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close="create">取消</button>
+        <button type="submit" class="btn btn-primary">创建</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="modal-join" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-join-title">
+  <div class="modal-card">
+    <h2 id="modal-join-title">加入房间</h2>
+    <p class="modal-hint">输入房主分享的 4 位房间码。</p>
+    <form id="form-join">
+      <label class="field">
+        <span>房间码</span>
+        <input id="join-code" maxlength="4" placeholder="XXXX" autocomplete="off" class="code-input" />
+      </label>
+      <p id="join-error" class="error-msg"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close="join">取消</button>
+        <button type="submit" class="btn btn-secondary">加入</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 <!-- ============ 等待室 ============ -->
 <section id="view-lobby" class="view hidden">
@@ -53,17 +102,22 @@
       <!-- 左列：房间码 + 玩家列表 -->
       <div class="lobby-main">
         <div class="ticket">
-          <span class="ticket-label">房间码</span>
-          <span id="lobby-code" class="ticket-code">----</span>
+          <span class="ticket-label">房间名</span>
+          <span id="lobby-name" class="ticket-name">----</span>
+          <div class="ticket-code-row">
+            <span class="ticket-label">房间码</span>
+            <span id="lobby-code" class="ticket-code">----</span>
+          </div>
         </div>
 
         <div class="player-list" id="lobby-players"></div>
       </div>
 
-      <!-- 右列：房间设置（地图大小、初始血量） -->
+      <!-- 右列：游戏设置（地图大小、初始血量） -->
       <aside class="lobby-side">
         <div class="settings-panel">
-          <h2 class="settings-title">房间设置</h2>
+          <h2 class="settings-title">游戏设置</h2>
+          <p class="settings-hint">仅房主可修改</p>
           <div class="settings-group">
             <span class="settings-label">地图大小</span>
             <div id="map-picker" class="map-picker" role="group" aria-label="地图大小"></div>
@@ -93,6 +147,7 @@
     <div class="hud" id="hud-scores"></div>
     <div class="canvas-shell">
       <canvas id="game-canvas" width="960" height="640"></canvas>
+      <div id="spectator-banner" class="spectator-banner hidden" role="status">观战中 · 比赛结束后自动加入</div>
       <div id="overlay-round" class="overlay hidden">
         <div class="overlay-card">
           <div id="overlay-title" class="overlay-title">回合结束</div>

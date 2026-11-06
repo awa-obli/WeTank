@@ -59,7 +59,7 @@ function check(ok, label) {
 
 async function main() {
   const host = await connect();
-  send(host, { type: 'create_room', name: '房主' });
+  send(host, { type: 'create_room', name: '房主', roomName: '容量测试房' });
   const joined = await waitForMsg(host, (m) => m.type === 'joined', 'joined(房主)');
   const code = joined.code;
 

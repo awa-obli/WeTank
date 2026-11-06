@@ -4,6 +4,7 @@
   // ---------- 视图切换 ----------
   const views = {
     landing: document.getElementById('view-landing'),
+    rooms: document.getElementById('view-rooms'),
     lobby: document.getElementById('view-lobby'),
     game: document.getElementById('view-game'),
   };
@@ -12,13 +13,30 @@
   }
 
   // ---------- DOM 元素 ----------
-  const createNameEl = document.getElementById('create-name');
-  const joinNameEl = document.getElementById('join-name');
-  const joinCodeEl = document.getElementById('join-code');
-  const btnCreate = document.getElementById('btn-create');
-  const btnJoin = document.getElementById('btn-join');
+  const nicknameEl = document.getElementById('nickname');
+  const btnEnterRooms = document.getElementById('btn-enter-rooms');
   const landingError = document.getElementById('landing-error');
 
+  const roomsListEl = document.getElementById('rooms-list');
+  const roomsEmptyEl = document.getElementById('rooms-empty');
+  const roomsCountEl = document.getElementById('rooms-count');
+  const roomsErrorEl = document.getElementById('rooms-error');
+  const roomsNicknameEl = document.getElementById('rooms-nickname');
+  const btnCreateRoom = document.getElementById('btn-create-room');
+  const btnJoinRoom = document.getElementById('btn-join-room');
+  const btnBackHome = document.getElementById('btn-back-home');
+
+  const modalCreate = document.getElementById('modal-create');
+  const modalJoin = document.getElementById('modal-join');
+  const formCreate = document.getElementById('form-create');
+  const createRoomNameEl = document.getElementById('create-room-name');
+  const createErrorEl = document.getElementById('create-error');
+  const formJoin = document.getElementById('form-join');
+  const joinCodeEl = document.getElementById('join-code');
+  const joinErrorEl = document.getElementById('join-error');
+  const toastEl = document.getElementById('toast');
+
+  const lobbyNameEl = document.getElementById('lobby-name');
   const lobbyCodeEl = document.getElementById('lobby-code');
   const lobbyPlayersEl = document.getElementById('lobby-players');
   const mapPickerEl = document.getElementById('map-picker');
@@ -31,6 +49,7 @@
   const hudScores = document.getElementById('hud-scores');
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
+  const spectatorBanner = document.getElementById('spectator-banner');
   const overlayRound = document.getElementById('overlay-round');
   const overlayTitle = document.getElementById('overlay-title');
   const overlaySub = document.getElementById('overlay-sub');
@@ -39,14 +58,23 @@
   const joystickStick = document.getElementById('joystick-stick');
   const btnMoveToggle = document.getElementById('btn-move-toggle');
   const btnFire = document.getElementById('btn-fire');
+  const touchControls = document.getElementById('touch-controls');
 
   // ---------- 状态 ----------
   let ws = null;
   let myId = null;
   let hostId = null;
   let roomCode = null;
+  let roomName = '';
   let players = [];
-  let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改
+  let spectators = [];
+  let spectating = false; // true 时自己是观战者：没有坦克、不能操作，整场比赛结束后转正
+  let roomList = [];
+  let toastTimer = null;
+  let joinPendingCode = null;
+  let joinPendingTimer = null;
+  const NICKNAME_KEY = 'tank.nickname';
+  let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
   let maxHp = 3; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
   const MIN_HP = 1;
   const MAX_HP = 20;
@@ -72,6 +100,9 @@
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
   const SPAWN_PROTECT_TIME = 3; // 与服务端 SPAWN_PROTECT_TIME 一致，用于把剩余秒数换算成进度弧比例
+  const SPAWN_ANIM_SCALE = 5; // 重生动画的起始放大倍数，收缩到正常 1 倍
+  const SPAWN_ANIM_ALPHA = 0; // 起始不透明度：0 = 完全透明，随动画淡入到 1
+  let spawnAnimTime = 0.75; // 重生动画总时长（秒），开局时以 game_start 广播为准
   const AMMO_MAX = 5; // 与服务端 AMMO_MAX 一致，仅作为 ammo 消息到达前的初始显示值
   // 弹药是个人资源，服务端只私发本人的数量；这里只会存自己这一份，
   // 所以其他坦克身上根本没有弹药数据，界面上也无从显示。
@@ -91,82 +122,255 @@
 
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}`);
-    ws.addEventListener('message', onMessage);
-    ws.addEventListener('close', () => {
-      if (!views.landing.classList.contains('hidden')) return;
-      landingErrorShow('与服务器断开连接，请刷新页面重试');
+    const socket = new WebSocket(`${proto}://${location.host}`);
+    ws = socket;
+    socket.addEventListener('message', onMessage);
+    socket.addEventListener('close', () => {
+      if (ws !== socket) return; // 已经被新连接替换掉的旧 socket，忽略
+      ws = null;
+      closeAllModals();
+      if (views.landing.classList.contains('hidden')) {
+        showView('landing');
+        showToast('与服务器断开连接，请重新开始');
+      } else {
+        landingErrorShow('与服务器断开连接，请刷新页面重试');
+      }
     });
     return new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', reject, { once: true });
+      socket.addEventListener('open', resolve, { once: true });
+      socket.addEventListener('error', reject, { once: true });
     });
   }
 
+  async function ensureConnected() {
+    if (ws && ws.readyState === WebSocket.OPEN) return true;
+    try {
+      await connect();
+      return true;
+    } catch (e) {
+      ws = null;
+      return false;
+    }
+  }
+
   function landingErrorShow(msg) { landingError.textContent = msg; }
+
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 3200);
+  }
+
+  // 房间列表可能很长，点下面的房间失败时只在顶部写一行会看不到，所以同时弹一个轻提示。
+  function roomsErrorShow(msg) {
+    roomsErrorEl.textContent = msg;
+    showToast(msg);
+  }
 
   function send(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
   }
 
-  // ---------- 创建 / 加入 ----------
-  btnCreate.addEventListener('click', async () => {
-    landingErrorShow('');
+  function nicknameValue() {
+    return nicknameEl.value.trim();
+  }
+
+  // 昵称保存在本地，下次打开页面自动带出来；主页仍然只有一个「开始游戏」按钮。
+  try {
+    nicknameEl.value = localStorage.getItem(NICKNAME_KEY) || '';
+  } catch (e) {
+    // 隐私模式下 localStorage 可能不可用，忽略即可
+  }
+  nicknameEl.addEventListener('input', () => {
     try {
-      if (!ws) await connect();
-      send({ type: 'create_room', name: createNameEl.value });
+      localStorage.setItem(NICKNAME_KEY, nicknameEl.value);
     } catch (e) {
-      landingErrorShow('无法连接服务器');
+      // 忽略存储失败，不影响游戏
     }
   });
 
-  btnJoin.addEventListener('click', async () => {
+  // ---------- 主页 / 房间列表 ----------
+  btnEnterRooms.addEventListener('click', async () => {
     landingErrorShow('');
-    const code = joinCodeEl.value.trim().toUpperCase();
-    if (code.length !== 4) {
-      landingErrorShow('请输入 4 位房间码');
+    try {
+      localStorage.setItem(NICKNAME_KEY, nicknameEl.value);
+    } catch (e) {
+      // 忽略存储失败
+    }
+    const ok = await ensureConnected();
+    if (!ok) {
+      landingErrorShow('无法连接服务器');
       return;
     }
-    try {
-      if (!ws) await connect();
-      send({ type: 'join_room', name: joinNameEl.value, code });
-    } catch (e) {
-      landingErrorShow('无法连接服务器');
+    roomsErrorEl.textContent = '';
+    roomsNicknameEl.textContent = nicknameValue() || '未命名指挥官';
+    showView('rooms');
+    send({ type: 'list_rooms' });
+  });
+
+  btnBackHome.addEventListener('click', () => {
+    showView('landing');
+  });
+
+  function openModal(modal, focusEl) {
+    modal.classList.remove('hidden');
+    // 等 hidden 移除、元素可聚焦后再 focus，避免部分浏览器里 focus 落空
+    setTimeout(() => focusEl.focus(), 0);
+  }
+
+  function closeModal(modal) {
+    modal.classList.add('hidden');
+  }
+
+  function closeAllModals() {
+    closeModal(modalCreate);
+    closeModal(modalJoin);
+  }
+
+  btnCreateRoom.addEventListener('click', () => {
+    createRoomNameEl.value = '';
+    createErrorEl.textContent = '';
+    openModal(modalCreate, createRoomNameEl);
+  });
+
+  createRoomNameEl.addEventListener('input', () => {
+    createErrorEl.textContent = '';
+  });
+
+  btnJoinRoom.addEventListener('click', () => {
+    joinCodeEl.value = '';
+    joinErrorEl.textContent = '';
+    openModal(modalJoin, joinCodeEl);
+  });
+
+  joinCodeEl.addEventListener('input', () => {
+    joinCodeEl.value = joinCodeEl.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+    joinErrorEl.textContent = '';
+  });
+
+  formCreate.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const newRoomName = createRoomNameEl.value.trim();
+    if (!newRoomName) {
+      createErrorEl.textContent = '请先填写房间名';
+      createRoomNameEl.focus();
+      return;
     }
+    createErrorEl.textContent = '';
+    if (!(await ensureConnected())) {
+      createErrorEl.textContent = '无法连接服务器';
+      return;
+    }
+    send({ type: 'create_room', name: nicknameValue(), roomName: newRoomName });
+  });
+
+  formJoin.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = joinCodeEl.value.trim().toUpperCase();
+    if (code.length !== 4) {
+      joinErrorEl.textContent = '请输入 4 位房间码';
+      joinCodeEl.focus();
+      return;
+    }
+    joinErrorEl.textContent = '';
+    if (!(await ensureConnected())) {
+      joinErrorEl.textContent = '无法连接服务器';
+      return;
+    }
+    send({ type: 'join_room', name: nicknameValue(), code });
+  });
+
+  modalCreate.querySelector('[data-close]').addEventListener('click', () => closeModal(modalCreate));
+  modalJoin.querySelector('[data-close]').addEventListener('click', () => closeModal(modalJoin));
+  [modalCreate, modalJoin].forEach((modal) => {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeModal(modal);
+    });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAllModals();
   });
 
   btnStart.addEventListener('click', () => send({ type: 'start_game' }));
   btnLeaveLobby.addEventListener('click', () => {
     send({ type: 'leave_room' });
-    location.reload();
+    resetAfterLeave();
+    roomsErrorEl.textContent = '';
+    roomsNicknameEl.textContent = nicknameValue() || '未命名指挥官';
+    showView('rooms');
+    send({ type: 'list_rooms' });
   });
 
   // ---------- 消息处理 ----------
   function onMessage(evt) {
     const msg = JSON.parse(evt.data);
     switch (msg.type) {
+      case 'room_list':
+        roomList = Array.isArray(msg.rooms) ? msg.rooms : [];
+        renderRooms();
+        break;
+
       case 'joined':
+        joinPendingCode = null;
+        clearTimeout(joinPendingTimer);
         myId = msg.playerId;
         hostId = msg.hostId;
         roomCode = msg.code;
-        players = msg.players;
+        roomName = msg.roomName || '';
+        players = msg.players || [];
+        spectators = msg.spectators || [];
+        spectating = !!msg.spectating;
         mapSize = msg.mapSize || 'medium';
         maxHp = msg.maxHp || 3;
         lobbyCodeEl.textContent = roomCode;
+        lobbyNameEl.textContent = roomName || '未命名房间';
+        roomsErrorEl.textContent = '';
+        closeAllModals();
         renderLobby();
-        showView('lobby');
+        // 观战者先停在当前页，等服务端紧接着补发的 game_start 快照再切到对局画面。
+        if (!spectating) showView('lobby');
+        updateSpectatorUi();
         break;
 
-      case 'error':
-        landingErrorShow(msg.message);
+      case 'error': {
+        joinPendingCode = null;
+        clearTimeout(joinPendingTimer);
+        const message = msg.message || '操作失败';
+        if (!modalCreate.classList.contains('hidden')) {
+          createErrorEl.textContent = message;
+        } else if (!modalJoin.classList.contains('hidden')) {
+          joinErrorEl.textContent = message;
+        } else if (!views.rooms.classList.contains('hidden')) {
+          roomsErrorShow(message);
+        } else if (!views.landing.classList.contains('hidden')) {
+          landingErrorShow(message);
+        } else {
+          // 大厅/游戏里没有主页错误行，用轻提示，避免错误信息被隐藏
+          showToast(message);
+        }
         break;
+      }
 
       case 'room_update':
         hostId = msg.hostId;
-        players = msg.players;
+        roomName = msg.roomName || roomName;
+        players = msg.players || players;
+        spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
+        if (myId) {
+          if (players.some((p) => p.id === myId)) spectating = false;
+          else if (spectators.some((s) => s.id === myId)) spectating = true;
+        }
         mapSize = msg.mapSize || mapSize;
         maxHp = msg.maxHp || maxHp;
+        lobbyNameEl.textContent = roomName || '未命名房间';
         renderLobby();
+        // 游戏中玩家进出不一定伴随 state 变化，这里立即按最新名单重建顶部标签。
+        if (!views.game.classList.contains('hidden')) {
+          renderHud();
+          renderHudFromTanks();
+          updateSpectatorUi();
+        }
         break;
 
       case 'game_start':
@@ -174,11 +378,15 @@
         worldW = msg.worldW;
         worldH = msg.worldH;
         maxHp = msg.maxHp || maxHp;
+        spawnAnimTime = msg.spawnMaterialize || spawnAnimTime; // 重生动画总时长，与服务端保持一致
         // 画布按世界尺寸调整（CSS 负责等比缩放到容器），这样不同档位的地图
         // 都能用同一套世界坐标绘制，不需要额外换算缩放比。
         canvas.width = worldW;
         canvas.height = worldH;
-        players = msg.players;
+        players = msg.players || [];
+        spectators = msg.spectators || [];
+        // 观战快照会显式带 spectating；下一回合的普通 game_start 则通过"自己是否在 players 里"判断。
+        spectating = !!msg.spectating || !players.some((p) => p.id === myId);
         explosions = [];
         trails = [];
         spawnBlockFx = [];
@@ -195,8 +403,11 @@
         myAmmoMax = AMMO_MAX;
         myAmmoReload = 0;
         overlayRound.classList.add('hidden');
+        resetMoveToggleForRespawn();
         renderHud();
         showView('game');
+        updateSpectatorUi();
+        if (spectating && isTouchDevice) touchControls.classList.add('hidden');
         break;
 
       case 'ammo':
@@ -207,17 +418,30 @@
         myAmmoReload = msg.reload || 0;
         break;
 
-      case 'state':
+      case 'state': {
+        const prevSpecIds = spectators.map((s) => s.id).join('|');
+        spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
+        const activeChanged = syncPlayersFromTanks(msg.tanks);
+        const specChanged = prevSpecIds !== spectators.map((s) => s.id).join('|');
+        if (myId) {
+          if (players.some((p) => p.id === myId)) spectating = false;
+          else if (spectators.some((s) => s.id === myId)) spectating = true;
+        }
+
         detectDeaths(msg.tanks);
         updateSpeedTrails(msg.tanks);
         tanks = msg.tanks;
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
+        if (activeChanged || specChanged) renderHud(); // 名单有进出时立即重建顶部标签
+        syncSelfState(); // 自己阵亡/观战时收起触屏控件并清空输入
         applyJoystickSteering(); // 用刚收到的最新朝向重新计算该转左还是转右
         renderHudFromTanks();
+        updateSpectatorUi();
         draw();
         break;
+      }
 
       case 'spawn_block':
         // 出生保护挡下子弹：在命中点放一圈很快扩散消失的白色火花
@@ -243,7 +467,8 @@
         break;
 
       case 'round_end':
-        players = msg.scores;
+        players = msg.scores || players;
+        spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
         renderHud();
         // renderHud 会重建 HUD，死状态（删除线/红心）会丢；用最后一帧坦克状态补回来，
         // 让结算展示期间阵亡玩家继续显示红色 + 删除线。
@@ -251,12 +476,23 @@
         overlayTitle.textContent = msg.winnerId
           ? `${nameOf(msg.winnerId)} 获胜本回合！`
           : '平局！';
-        overlaySub.textContent = '下一回合即将开始…';
+        // 决胜回合 3 秒后会直接广播 match_end 回大厅，这里不能说"下一回合即将开始"。
+        overlaySub.textContent = msg.final
+          ? '比赛结束，即将返回房间…'
+          : '下一回合即将开始…';
         overlayRound.classList.remove('hidden');
         break;
 
       case 'match_end':
-        players = msg.scores;
+        players = msg.scores || players;
+        spectators = Array.isArray(msg.spectators) ? msg.spectators : [];
+        if (msg.hostId) hostId = msg.hostId;
+        // 整场比赛结束后服务端会把观战者转正；这里同步切换成正式玩家。
+        if (myId) {
+          if (players.some((p) => p.id === myId)) spectating = false;
+          else if (spectators.some((s) => s.id === myId)) spectating = true;
+        }
+        updateSpectatorUi();
         renderHud();
         renderHudFromTanks();
         if (msg.reason === 'not_enough_players') {
@@ -295,8 +531,146 @@
     });
   }
 
+  // ---------- 房间列表渲染 ----------
+  // 列表只展示选房间需要的信息：房间名、房间码、人数、状态、房主。
+  // 地图/血量等房间内设置不在这里展示，也不通过 room_list 同步。
+  function roomStatus(room) {
+    if (room.playerCount >= room.maxPlayers) return { label: '已满', cls: 'full' };
+    if (room.state !== 'lobby') return { label: '游戏中', cls: 'playing' };
+    return { label: '等待中', cls: 'waiting' };
+  }
+
+  // 列表项本身就是按钮：等待中的房间直接加入；游戏中的房间以观战身份进入，整场比赛结束后转正。
+  function joinRoomFromList(room) {
+    if (joinPendingCode) return; // 上一次加入请求还没回来，避免连点发出多个 join_room
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      roomsErrorShow('与服务器断开连接，请重新开始');
+      return;
+    }
+    if (room.playerCount >= room.maxPlayers) {
+      roomsErrorShow(`房间已满（最多${room.maxPlayers}人）`);
+      return;
+    }
+    roomsErrorEl.textContent = '';
+    joinPendingCode = room.code;
+    clearTimeout(joinPendingTimer);
+    joinPendingTimer = setTimeout(() => {
+      joinPendingCode = null;
+    }, 4000);
+    send({ type: 'join_room', name: nicknameValue(), code: room.code });
+  }
+
+  function renderRooms() {
+    roomsListEl.replaceChildren();
+    const hasRooms = roomList.length > 0;
+    roomsEmptyEl.classList.toggle('hidden', hasRooms);
+    roomsCountEl.textContent = hasRooms
+      ? `共 ${roomList.length} 个房间 · 点击加入或观战`
+      : '暂无房间';
+
+    roomList.forEach((room) => {
+      // 用 button 而不是 article：整张卡片可点击、可键盘聚焦，按 Enter/空格也能直接加入。
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'room-card';
+      card.dataset.code = room.code;
+      const status = roomStatus(room);
+      const joinable = room.playerCount < room.maxPlayers;
+      const observing = room.state !== 'lobby';
+      card.classList.toggle('room-card-joinable', joinable);
+      card.title = !joinable
+        ? '房间已满'
+        : (observing ? `点击进入观战「${room.name || '未命名房间'}」` : `点击加入「${room.name || '未命名房间'}」`);
+      card.addEventListener('click', () => joinRoomFromList(room));
+
+      const main = document.createElement('span');
+      main.className = 'room-main';
+
+      const top = document.createElement('span');
+      top.className = 'room-top';
+      const name = document.createElement('span');
+      name.className = 'room-name';
+      name.textContent = room.name || '未命名房间';
+      const badge = document.createElement('span');
+      badge.className = `room-badge ${status.cls}`;
+      badge.textContent = status.label;
+      top.appendChild(name);
+      top.appendChild(badge);
+
+      const meta = document.createElement('span');
+      meta.className = 'room-meta';
+
+      const codeLabel = document.createElement('span');
+      codeLabel.append('房间码 ');
+      const code = document.createElement('span');
+      code.className = 'room-code';
+      code.textContent = room.code;
+      codeLabel.appendChild(code);
+      meta.appendChild(codeLabel);
+
+      const count = document.createElement('span');
+      count.textContent = `玩家 ${room.playerCount}/${room.maxPlayers}`;
+      meta.appendChild(count);
+
+      if (room.hostName) {
+        const host = document.createElement('span');
+        host.textContent = `房主 ${room.hostName}`;
+        meta.appendChild(host);
+      }
+
+      main.appendChild(top);
+      main.appendChild(meta);
+      card.appendChild(main);
+
+      if (joinable) {
+        const enter = document.createElement('span');
+        enter.className = 'room-enter';
+        enter.textContent = observing ? '观战 →' : '进入 →';
+        card.appendChild(enter);
+      }
+
+      roomsListEl.appendChild(card);
+    });
+  }
+
+  // 离开房间后回到列表：清掉上一局的本地状态，避免残留的 HUD/画布数据影响下一次进入房间。
+  function resetAfterLeave() {
+    myId = null;
+    hostId = null;
+    roomCode = null;
+    roomName = '';
+    players = [];
+    spectators = [];
+    spectating = false;
+    roomList = [];
+    maze = null;
+    tanks = [];
+    bullets = [];
+    items = [];
+    explosions = [];
+    trails = [];
+    spawnBlockFx = [];
+    hitSparks = [];
+    floatTexts = [];
+    prevAlive = {};
+    prevShield = {};
+    prevPos = {};
+    hitFlash = {};
+    lastHp = {};
+    lobbyNameEl.textContent = '----';
+    lobbyCodeEl.textContent = '----';
+    lobbyPlayersEl.replaceChildren();
+    hudScores.replaceChildren();
+    spectatorBanner.classList.add('hidden');
+    overlayRound.classList.add('hidden');
+    renderRooms();
+  }
+
   // ---------- 大厅渲染 ----------
   function renderLobby() {
+    lobbyNameEl.textContent = roomName || '未命名房间';
+    lobbyNameEl.title = lobbyNameEl.textContent;
+    lobbyCodeEl.textContent = roomCode || '----';
     lobbyPlayersEl.innerHTML = '';
     players.forEach((p) => {
       const row = document.createElement('div');
@@ -408,6 +782,29 @@
     return svg;
   }
 
+  // 用 state 里的坦克名单兜底同步正式玩家名单：即使某条 room_update 没到，顶部标签也不会残留。
+  function syncPlayersFromTanks(currentTanks) {
+    if (!Array.isArray(currentTanks)) return false;
+    const prevIds = players.map((p) => p.id).join('|');
+    const nextIds = currentTanks.map((t) => t.id).join('|');
+    if (prevIds === nextIds) return false;
+    const oldById = new Map(players.map((p) => [p.id, p]));
+    players = currentTanks.map((t) => {
+      const old = oldById.get(t.id);
+      return {
+        id: t.id, name: t.name, color: t.color,
+        score: old ? old.score : 0,
+        connected: true,
+      };
+    });
+    return true;
+  }
+
+  function updateSpectatorUi() {
+    spectatorBanner.classList.toggle('hidden', !spectating);
+    if (spectating && isTouchDevice) touchControls.classList.add('hidden');
+  }
+
   function renderHud() {
     hudScores.innerHTML = '';
     players.forEach((p) => {
@@ -432,6 +829,25 @@
       item.appendChild(dot);
       item.appendChild(label);
       item.appendChild(hp);
+      hudScores.appendChild(item);
+    });
+
+    // 观战者仍然出现在顶部，但不显示血量/分数，用虚线和「观战」徽章区分。
+    spectators.forEach((s) => {
+      const item = document.createElement('div');
+      item.className = 'hud-item hud-item-spectator';
+      item.id = 'hud-' + s.id;
+      const dot = document.createElement('span');
+      dot.className = 'hud-dot hud-dot-spectator';
+      const label = document.createElement('span');
+      label.className = 'hud-label';
+      label.textContent = s.name;
+      const tag = document.createElement('span');
+      tag.className = 'hud-spectator-tag';
+      tag.textContent = '观战';
+      item.appendChild(dot);
+      item.appendChild(label);
+      item.appendChild(tag);
       hudScores.appendChild(item);
     });
   }
@@ -515,18 +931,34 @@
 
   function drawTank(t, now) {
     const isSelf = t.id === myId;
+    // 阵亡后不画任何残影：车体直接消失，只留死亡爆炸特效
+    if (!t.alive) return;
     // 别人视角：隐身的坦克完全不画（车身、炮管、护盾光环、名字全部跳过）
     if (t.invisible && !isSelf) return;
+    // 重生动画期间：服务端判定这辆坦克还没有实体，所以只画正在凝聚的车身，
+    // 名字、血条、护盾环、出生保护环全部等实体出现后再画。
+    const spawning = t.spawnAnim > 0;
 
     ctx.save();
     ctx.translate(t.x, t.y);
-    if (!t.alive) ctx.globalAlpha = 0.25;
     // 自己视角：自己隐身时整体变半透明，直观提示"我现在是隐身状态"
     if (t.invisible && isSelf) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA;
     ctx.rotate(t.angle);
 
     ctx.strokeStyle = '#06110F';
     ctx.lineWidth = 3;
+
+    // 重生动画：从 5 倍大小、完全透明开始，一边收缩一边淡入到正常大小。
+    // 用 easeOutCubic 让收缩先快后慢，落定感更自然。
+    if (spawning) {
+      const p = clampNum(1 - t.spawnAnim / spawnAnimTime, 0, 1);
+      const e = 1 - Math.pow(1 - p, 3);
+      const s = SPAWN_ANIM_SCALE + (1 - SPAWN_ANIM_SCALE) * e;
+      ctx.scale(s, s);
+      // 描边宽度要除以缩放倍数，否则放大阶段描边会跟着变粗
+      ctx.lineWidth = 3 / s;
+      ctx.globalAlpha *= SPAWN_ANIM_ALPHA + (1 - SPAWN_ANIM_ALPHA) * e;
+    }
 
     // 车身（最底层的方形履带车体）
     ctx.fillStyle = t.color;
@@ -581,7 +1013,7 @@
 
     ctx.restore();
 
-    if (t.alive) {
+    if (t.alive && !spawning) {
       ctx.save();
       if (t.invisible && isSelf) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA;
 
@@ -649,9 +1081,10 @@
   const AMMO_BADGE_PAD_X = 6;
   const AMMO_BADGE_H = 25; // 上内边距 + 弹条高 + 进度条 + 下内边距
 
-  function drawAmmoBadge(now) {
+  function drawAmmoBadge() {
     const self = tanks.find((t) => t.id === myId);
     if (!self || !self.alive) return;
+    if (self.spawnAnim > 0) return; // 重生动画期间还没有实体，角标等实体出现后再显示
 
     const max = Math.max(1, myAmmoMax);
     const ammo = clampNum(myAmmo, 0, max);
@@ -668,9 +1101,8 @@
 
     ctx.save();
     if (self.invisible) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA; // 自己隐身时角标跟着半透明
-    // 空弹时整体红色脉冲：比静态红色更醒目，又不至于像死亡特效那样吵闹
-    if (empty) ctx.globalAlpha *= 0.55 + 0.45 * Math.abs(Math.sin(now / 220));
 
+    // 空弹只保留静态红边提示，不做闪烁/脉冲动画
     ctx.fillStyle = 'rgba(6, 17, 15, 0.88)';
     ctx.beginPath();
     ctx.roundRect(bx, by, badgeW, AMMO_BADGE_H, 5);
@@ -950,7 +1382,7 @@
     drawTrails(now);
     tanks.forEach((t) => drawTank(t, now));
     bullets.forEach(drawBullet);
-    drawAmmoBadge(now); // 画在子弹之上，贴边时也不会被飞过的子弹盖住
+    drawAmmoBadge(); // 画在子弹之上，贴边时也不会被飞过的子弹盖住
     drawExplosions(now);
     drawShieldBreaks(now);
     drawSpawnBlocks(now);
@@ -971,6 +1403,7 @@
   };
 
   function updateInput() {
+    if (spectating) return; // 观战者没有坦克，绝不发送输入
     const snapshot = JSON.stringify(keyState);
     if (snapshot !== lastSent) {
       lastSent = snapshot;
@@ -982,7 +1415,8 @@
     const key = KEY_MAP[e.code];
     if (!key) return;
     if (views.game.classList.contains('hidden')) return;
-    e.preventDefault();
+    e.preventDefault(); // 观战时也拦住方向键/空格，避免页面滚动
+    if (spectating) return;
     keyState[key] = true;
     updateInput();
   });
@@ -1001,6 +1435,51 @@
   // 用 pointer:coarse 判断是否为触屏设备（比单纯看屏幕宽度更可靠，
   // 能避免把触屏笔记本/平板误判，也能兼容小尺寸横屏手机）。
   const isTouchDevice = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+
+  // 自己阵亡、或者重生动画还没播完（坦克还没出现）时，收起摇杆/开火/移动切换：
+  // 这两种状态下按了也没用，露出来只会误触。阵亡时同时清空本地输入，
+  // 免得复活瞬间还带着死前按住的方向。
+  function syncSelfState() {
+    if (spectating) {
+      // 观战者没有自己的坦克：收起控件、清空可能残留的按键。
+      if (isTouchDevice) touchControls.classList.add('hidden');
+      joystickVector = null;
+      lastUseBackward = false;
+      if (resetJoystickDrag) resetJoystickDrag();
+      if (resetFireButton) resetFireButton();
+      keyState.forward = false;
+      keyState.backward = false;
+      keyState.left = false;
+      keyState.right = false;
+      keyState.shoot = false;
+      return;
+    }
+    const self = tanks.find((t) => t.id === myId);
+    const alive = !!self && self.alive;
+    // 实体真正出现（存活且重生动画播完）之前都算“还没上场”，控件保持隐藏
+    const canAct = alive && !(self.spawnAnim > 0);
+    if (isTouchDevice) touchControls.classList.toggle('hidden', !canAct);
+    if (!alive) {
+      joystickVector = null;
+      lastUseBackward = false;
+      if (resetJoystickDrag) resetJoystickDrag(); // 手还按在摇杆上时也要松开，否则复活后摇杆不响应
+      if (resetFireButton) resetFireButton(); // 开火键同理
+      keyState.forward = false;
+      keyState.backward = false;
+      keyState.left = false;
+      keyState.right = false;
+      keyState.shoot = false;
+      updateInput();
+    }
+  }
+
+  // 新回合重生时，移动/静止切换恢复为默认的“移动”态，不沿用上一局死前的选择。
+  function resetMoveToggleForRespawn() {
+    isMoving = true;
+    lastUseBackward = false;
+    btnMoveToggle.classList.toggle('active', true);
+    btnMoveToggle.textContent = '移动';
+  }
 
   // 摇杆代表"希望坦克朝哪个方向走"，而不是直接的"前后/左右"按键：
   // 每次收到服务端的 state（带最新车身朝向 angle）都会重新计算一次。
@@ -1023,6 +1502,8 @@
   // 车尾朝向就是车头朝向 +π，绕车身中心转向时车头车尾同步转动，
   // 所以用"目标方向 - 车尾朝向"算出来的夹角符号，同样是正确的左转/右转依据。
   let joystickVector = null; // {x, y}，归一化到 -1..1；居中/松开时为 null
+  let resetJoystickDrag = null; // 由 setupJoystick 赋值：阵亡时强制松开摇杆、释放指针捕获
+  let resetFireButton = null; // 由 setupFireButton 赋值：阵亡时强制松开开火键、释放指针捕获
   let isMoving = true;       // false=静止(只转向)，true=移动(前进/倒退)；由 btn-move-toggle 切换，默认移动态
   let lastUseBackward = false; // 上一帧是否处于倒退，用于滞回判断；松开摇杆/切静止/坦克未就绪时重置
   const JOY_DEADZONE = 0.25;    // 摇杆推动幅度小于此值时视为居中，不移动、不转向
@@ -1051,8 +1532,8 @@
     }
 
     const myTank = tanks.find((t) => t.id === myId);
-    if (!myTank) {
-      // 游戏刚开始、还没收到过 state，先不移动，只等下一帧 state 到来再决定
+    if (!myTank || !myTank.alive) {
+      // 还没收到过 state，或者自己已经阵亡：先不移动，等下一帧 state 到来再决定
       keyState.forward = false;
       keyState.backward = false;
       keyState.left = false;
@@ -1167,6 +1648,21 @@
     });
     joystickZone.addEventListener('pointerup', endDrag);
     joystickZone.addEventListener('pointercancel', endDrag);
+
+    // 阵亡时控件会被隐藏，手指如果还按在摇杆上，pointerup 可能永远到不了 endDrag；
+    // 这里主动释放指针捕获并清空拖动状态，避免复活后摇杆因为 pointerId 一直占着而不响应。
+    resetJoystickDrag = function () {
+      if (pointerId !== null) {
+        try {
+          joystickZone.releasePointerCapture(pointerId);
+        } catch (e) {
+          // 指针已经不在捕获状态，忽略即可
+        }
+      }
+      pointerId = null;
+      joystickZone.classList.remove('active');
+      joystickStick.style.transform = 'translate(0, 0)';
+    };
   }
 
   function setupFireButton() {
@@ -1193,6 +1689,20 @@
     btnFire.addEventListener('pointerup', stop);
     btnFire.addEventListener('pointercancel', stop);
     btnFire.addEventListener('pointerleave', stop);
+
+    // 和摇杆同理：阵亡时按钮被隐藏，按住的指针可能收不到 pointerup，
+    // 主动释放捕获，避免复活后开火键因为 pointerId 一直占着而不响应。
+    resetFireButton = function () {
+      if (pointerId !== null) {
+        try {
+          btnFire.releasePointerCapture(pointerId);
+        } catch (e) {
+          // 指针已经不在捕获状态，忽略即可
+        }
+      }
+      pointerId = null;
+      btnFire.classList.remove('active');
+    };
   }
 
   // 必须放在 setupJoystick / setupMoveToggle / setupFireButton 以及它们依赖的

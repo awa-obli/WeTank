@@ -38,7 +38,7 @@ function send(ws, obj) {
 
 (async () => {
   const c1 = await connect();
-  c1.send(JSON.stringify({ type: 'create_room', name: '冒烟A' }));
+  c1.send(JSON.stringify({ type: 'create_room', name: '冒烟A', roomName: '冒烟测试房' }));
   const joined1 = await waitFor(c1, 'joined');
   const code = joined1.code;
 

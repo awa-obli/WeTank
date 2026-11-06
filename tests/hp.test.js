@@ -51,6 +51,7 @@ function makePlayer(id, ws) {
     homingReady: false,
     invisibleRemaining: 0,
     spawnProtectRemaining: 0,
+    spawnAnimRemaining: 0,
   };
 }
 
@@ -66,6 +67,8 @@ function makeRoom(playerCount) {
   }
   room.startRound();
   room.stopTicking(); // 测试里手动调用 tick()，不让真实定时器参与
+  // 这里关注的是实体出现之后的血量机制，直接跳过开局的 1 秒重生动画
+  for (const p of room.players.values()) p.spawnAnimRemaining = 0;
   return { room, sockets };
 }
 

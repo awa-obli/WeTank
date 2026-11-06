@@ -60,7 +60,7 @@ function check(ok, label) {
 
 async function createRoom(name) {
   const client = await connect();
-  send(client, { type: 'create_room', name });
+  send(client, { type: 'create_room', name, roomName: `${name}的房间` });
   const joined = await waitForMsg(client, (m) => m.type === 'joined', 'joined(房主)');
   return { client, joined };
 }

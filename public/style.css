@@ -54,6 +54,16 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   margin-bottom: 32px;
 }
 
+/* 新版主页：品牌 + 昵称 + 唯一的「开始游戏」按钮 */
+.landing-wrap { max-width: 420px; }
+.landing-wrap .brand h1 { margin-bottom: 6px; }
+.landing-sub {
+  color: var(--muted); font-size: 14px; font-weight: 600;
+  letter-spacing: .04em; margin: 0 0 30px;
+}
+.nickname-field { max-width: 320px; margin: 0 auto 18px; text-align: left; }
+.btn-start-game { max-width: 320px; margin: 0 auto; padding: 16px; font-size: 18px; }
+
 .card-row { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
 
 .panel {
@@ -94,6 +104,152 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 
 .error-msg { color: var(--red); font-weight: 600; min-height: 20px; margin: 18px 0 0; }
 
+/* ---------- 房间列表 ---------- */
+#view-rooms.view {
+  align-items: flex-start;
+  padding: 32px 24px 128px;
+}
+.rooms-wrap { width: 100%; max-width: 880px; margin: 0 auto; }
+
+.rooms-header {
+  display: flex; align-items: flex-start; gap: 16px;
+  margin-bottom: 22px;
+}
+.link-btn {
+  flex-shrink: 0;
+  background: none; border: none; padding: 10px 0;
+  color: var(--muted); font: inherit; font-size: 13px; font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.link-btn:hover { color: var(--green); }
+.rooms-heading { flex: 1; min-width: 0; }
+.rooms-heading h1 { font-size: 32px; letter-spacing: -0.01em; }
+.rooms-count { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+#rooms-error { margin: 0 0 12px; font-size: 13px; }
+
+.nickname-chip {
+  flex-shrink: 0; max-width: 200px;
+  padding: 6px 12px;
+  background: var(--panel); border: 2px solid var(--ink); border-radius: 999px;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.room-list { display: flex; flex-direction: column; gap: 12px; }
+.room-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  width: 100%;
+  background: var(--panel);
+  border: 3px solid var(--ink); border-radius: var(--radius);
+  box-shadow: 5px 5px 0 var(--ink);
+  padding: 16px 18px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  transition: transform .08s ease, box-shadow .08s ease, border-color .12s ease;
+}
+.room-main { flex: 1; min-width: 0; display: block; }
+.room-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.room-name {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 20px; font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.room-meta {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 4px 16px; margin-top: 7px;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+}
+.room-code {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--yellow); font-weight: 800; letter-spacing: .12em;
+}
+.room-badge {
+  display: inline-block; flex-shrink: 0;
+  padding: 3px 9px; border-radius: 7px;
+  font-size: 11px; font-weight: 800; letter-spacing: .04em;
+}
+.room-badge.waiting { background: var(--green); color: var(--ink); }
+.room-badge.playing { background: var(--yellow); color: var(--ink); }
+.room-badge.full { background: var(--red); color: var(--text); }
+.room-enter {
+  flex-shrink: 0;
+  color: var(--muted); font-size: 13px; font-weight: 700;
+  white-space: nowrap;
+}
+@media (hover: hover) {
+  .room-card-joinable:hover {
+    border-color: var(--green);
+    transform: translate(-2px, -2px);
+    box-shadow: 7px 7px 0 var(--ink);
+  }
+  .room-card-joinable:hover .room-enter { color: var(--green); }
+}
+.room-card:focus-visible { outline: 3px solid var(--green); outline-offset: 3px; }
+.room-card:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
+
+.rooms-empty {
+  border: 3px dashed var(--muted); border-radius: var(--radius);
+  padding: 54px 20px; text-align: center;
+  color: var(--muted);
+}
+.rooms-empty p { margin: 0; font-size: 17px; font-weight: 700; }
+.rooms-empty .rooms-empty-hint { margin-top: 8px; font-size: 13px; font-weight: 500; }
+
+.rooms-actions {
+  position: fixed;
+  left: max(24px, env(safe-area-inset-left));
+  right: max(24px, env(safe-area-inset-right));
+  bottom: max(24px, env(safe-area-inset-bottom));
+  z-index: 30;
+  display: flex; align-items: center; gap: 12px;
+  pointer-events: none; /* 透明容器不拦截点击，只有按钮本身可点 */
+}
+.rooms-actions > * { pointer-events: auto; }
+.rooms-actions .btn { width: auto; min-width: 140px; }
+.rooms-actions .link-btn { margin-right: auto; }
+
+/* ---------- 创建 / 加入弹窗 ---------- */
+.modal {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background: rgba(6, 17, 15, 0.74);
+}
+.modal-card {
+  width: 100%; max-width: 390px;
+  background: var(--panel);
+  border: 3px solid var(--ink); border-radius: var(--radius);
+  box-shadow: 8px 8px 0 var(--ink);
+  padding: 22px;
+  text-align: left;
+}
+.modal-card h2 { font-size: 20px; margin-bottom: 6px; }
+.modal-hint { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+.modal-card .error-msg { margin: 4px 0 0; font-size: 13px; min-height: 18px; }
+.modal-actions { display: flex; gap: 10px; margin-top: 8px; }
+.modal-actions .btn { flex: 1; width: auto; margin-top: 0; }
+.code-input {
+  text-transform: uppercase;
+  letter-spacing: .2em;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* 大厅/游戏内的轻提示：错误信息不再只能显示在主页 */
+.toast {
+  position: fixed; left: 50%; bottom: 104px; transform: translateX(-50%);
+  z-index: 60; max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  background: var(--panel-2);
+  border: 3px solid var(--ink); border-radius: 10px;
+  box-shadow: 4px 4px 0 var(--ink);
+  color: var(--text); font-weight: 600; text-align: center;
+}
+
 /* ---------- 等待室 ---------- */
 /* 两列布局：左列是房间码、玩家列表和开始/离开按钮，右列是房间设置（地图大小在最上面）。
    窄屏（<720px）自动堆叠成一列，顺序为 房间码/玩家 → 设置 → 操作按钮。 */
@@ -121,6 +277,14 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   position: relative;
 }
 .ticket-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.ticket-name {
+  display: block;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 24px; font-weight: 700;
+  margin: 4px 0 14px;
+  overflow-wrap: anywhere;
+}
+.ticket-code-row { border-top: 2px dashed rgba(143, 189, 182, 0.3); padding-top: 12px; }
 .ticket-code {
   display: block; font-family: 'JetBrains Mono', monospace;
   font-size: 48px; font-weight: 800; letter-spacing: .18em;
@@ -149,7 +313,8 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   box-shadow: 6px 6px 0 var(--ink);
   padding: 18px;
 }
-.settings-title { font-size: 16px; margin-bottom: 16px; }
+.settings-title { font-size: 16px; margin-bottom: 4px; }
+.settings-hint { color: var(--muted); font-size: 12px; font-weight: 600; margin: 0 0 16px; }
 .settings-label {
   display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px;
   font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
@@ -240,11 +405,31 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 /* 删除线只画在昵称/比分上，血量区域（爱心 + 数字）保持干净 */
 .hud-item.dead .hud-label { text-decoration: line-through; }
 
+/* 观战者标签：仍出现在顶部，但用虚线、弱化颜色和「观战」徽章与正式玩家区分 */
+.hud-item-spectator { border-style: dashed; opacity: .72; background: transparent; }
+.hud-item-spectator .hud-label { color: var(--muted); }
+.hud-dot-spectator { background: var(--muted); }
+.hud-spectator-tag {
+  padding: 2px 7px; border-radius: 6px;
+  background: var(--muted); color: var(--ink);
+  font-size: 11px; font-weight: 800; letter-spacing: .04em;
+}
+
 .canvas-shell { position: relative; width: 100%; max-width: 960px; }
 #game-canvas {
   width: 100%; height: auto; display: block;
   background: #1B4B43;
   border: 4px solid var(--ink); border-radius: 12px;
+}
+.spectator-banner {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 6px 14px;
+  background: rgba(6, 17, 15, 0.82);
+  border: 2px dashed var(--muted); border-radius: 999px;
+  color: var(--muted); font-size: 13px; font-weight: 700;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 .overlay {
@@ -258,10 +443,30 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .overlay-title { font-family: 'Space Grotesk', sans-serif; font-size: 28px; font-weight: 700; }
 .overlay-sub { color: var(--muted); margin-top: 8px; font-size: 14px; }
 
+@media (max-width: 640px) {
+  #view-rooms.view { padding: 20px 16px 118px; }
+  .rooms-header { align-items: center; gap: 12px; }
+  .rooms-heading h1 { font-size: 27px; }
+  .nickname-chip { margin-left: auto; max-width: 42vw; }
+  .room-card { align-items: flex-start; padding: 14px; }
+  .room-name { font-size: 18px; }
+  .room-enter { display: none; }
+  .rooms-actions {
+    left: 0; right: 0; bottom: 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: rgba(14, 42, 40, 0.94);
+    border-top: 3px solid var(--ink);
+    backdrop-filter: blur(6px);
+  }
+  .rooms-actions .btn { flex: 1; min-width: 0; }
+  .rooms-actions .link-btn { padding: 8px 0; font-size: 12px; }
+}
+
 @media (max-width: 560px) {
   .brand h1 { font-size: 32px; }
   .panel { width: 100%; max-width: 320px; }
   .ticket-code { font-size: 36px; }
+  .ticket-name { font-size: 20px; }
 }
 
 /* ---------- 移动端虚拟控件 ---------- */

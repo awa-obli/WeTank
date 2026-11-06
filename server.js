@@ -73,10 +73,16 @@ const REPAIR_HEAL = 1;
 // 色板长度必须 >= MAX_PLAYERS，否则房间没满就可能出现两人同色。
 const PLAYER_COLORS = ['#E63946', '#3A86FF', '#FFD60A', '#06D6A0', '#FF8A3D', '#C77DFF', '#FF5DA2'];
 const MAX_PLAYERS = 7;
+// 房间名只用于列表展示，限制长度并清理控制字符即可；重名允许，房间码才是唯一标识。
+const MAX_ROOM_NAME = 20;
 
 // 出生保护：每回合开局给所有玩家 3 秒无敌，期间子弹被吸收、不掉血；
 // 一旦开火立即解除（避免"守在别人出生点旁边、靠无敌白嫖击杀"）。
 const SPAWN_PROTECT_TIME = 3;
+
+// 重生动画：每回合开局所有人先在地图上"凝聚" 0.75 秒，这期间坦克还没有实体——
+// 不响应输入、不参与碰撞/拾取/受击，出生保护的 3 秒也要等动画播完才开始倒计时。
+const SPAWN_MATERIALIZE_TIME = 0.75;
 
 // ---------- 道具系统 ----------
 // repair 是血量机制配套的回血道具（维修包），其余 5 种是原有的增益道具。
@@ -110,6 +116,18 @@ function makeRoomCode() {
 
 function makeId() {
   return crypto.randomBytes(8).toString('hex');
+}
+
+// 正式参战玩家的完整初始状态；建房、加入大厅、观战者转正都复用同一份字段。
+function makePlayer(id, name, ws, room) {
+  return {
+    id, name, ws, color: room.assignColor(),
+    score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
+    input: { forward: false, backward: false, left: false, right: false, shoot: false },
+    shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
+    spawnProtectRemaining: 0, spawnAnimRemaining: 0,
+    ammo: AMMO_MAX, ammoReloadAcc: 0,
+  };
 }
 
 // 在网格里随机挑一个格子的中心点作为道具生成位置。
@@ -233,10 +251,13 @@ function clamp(v, min, max) {
 
 // ---------- 房间类 ----------
 class Room {
-  constructor(code) {
+  constructor(code, name = '') {
     this.code = code;
+    this.name = name;
+    this.createdAt = Date.now(); // 房间列表按创建时间排序，避免人数变化时行序来回跳
     this.hostId = null;
-    this.players = new Map(); // id -> player
+    this.players = new Map(); // id -> player（正式参战玩家）
+    this.spectators = new Map(); // id -> { id, name, ws }（观战者，不参与对局）
     this.state = 'lobby'; // lobby | playing | round_pending | round_over
     this.maze = null;
     this.bullets = [];
@@ -244,6 +265,7 @@ class Room {
     this.nextBulletId = 1;
     this.pendingWinnerId = null; // 只剩最后一人存活时，先记下这个人是谁，等 5 秒观察期结束再真正判定
     this.pendingTimeout = null;  // 5 秒观察期的定时器句柄
+    this.roundEndTimeout = null; // 回合结算后等待进入下一阶段的定时器
     this.joinCounter = 0; // 按加入顺序递增，用来给没填昵称的玩家生成"玩家 N"这样的默认名
     this.items = []; // 场上道具：{ id, type, x, y }
     this.nextItemId = 1;
@@ -263,6 +285,10 @@ class Room {
     for (const p of this.players.values()) {
       if (p.ws.readyState === WebSocket.OPEN) p.ws.send(data);
     }
+    // 观战者也要看到完整对局，才能实时观战；他们不在 players 里，不会被判定/计分。
+    for (const s of this.spectators.values()) {
+      if (s.ws.readyState === WebSocket.OPEN) s.ws.send(data);
+    }
   }
 
   // 大厅状态统一从这里广播，房主变更、玩家进出、地图大小改动都走同一条消息，
@@ -270,8 +296,10 @@ class Room {
   broadcastRoom() {
     this.broadcast({
       type: 'room_update',
+      roomName: this.name,
       hostId: this.hostId,
       players: this.playerList(),
+      spectators: this.spectatorList(),
       mapSize: this.mapSize,
       maxHp: this.maxHp,
     });
@@ -287,6 +315,14 @@ class Room {
     }));
   }
 
+  spectatorList() {
+    return [...this.spectators.values()].map((s) => ({ id: s.id, name: s.name }));
+  }
+
+  memberCount() {
+    return this.players.size + this.spectators.size;
+  }
+
   assignColor() {
     const used = new Set([...this.players.values()].map((p) => p.color));
     const free = PLAYER_COLORS.filter((c) => !used.has(c));
@@ -297,6 +333,55 @@ class Room {
     for (const p of this.players.values()) p.score = 0;
     this.state = 'playing';
     this.startRound();
+    broadcastRoomList(); // 房间列表里的状态从"等待中"变成"游戏中"
+  }
+
+  // 开局广播也用于中途加入的观战者补发快照：extra 里可以带 spectating: true。
+  gameStartMessage(extra = {}) {
+    return {
+      type: 'game_start',
+      maze: { wallsV: this.maze.wallsV, wallsH: this.maze.wallsH, cell: CELL, cols: this.cols, rows: this.rows, wallThick: WALL_THICK },
+      players: this.playerList(),
+      spectators: this.spectatorList(),
+      worldW: this.worldW,
+      worldH: this.worldH,
+      mapSize: this.mapSize,
+      maxHp: this.maxHp,
+      // 重生动画总时长（秒）：客户端用它把每帧的剩余时间换算成缩放/透明度进度。
+      spawnMaterialize: SPAWN_MATERIALIZE_TIME,
+      ...extra,
+    };
+  }
+
+  // 公共对局状态；中途加入的观战者也会收到一份同样的快照。
+  stateMessage() {
+    return {
+      type: 'state',
+      tanks: [...this.players.values()].map((p) => ({
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        angle: p.angle,
+        alive: p.alive,
+        hp: p.hp,
+        color: p.color,
+        name: p.name,
+        shield: p.shield,
+        speedBoost: p.speedBoostRemaining > 0,
+        tripleReady: p.tripleReady,
+        homingReady: p.homingReady,
+        invisible: p.invisibleRemaining > 0,
+        // 出生保护剩余秒数（保留 1 位小数）：客户端用它画光环进度弧，
+        // 0 表示没有保护；和道具护盾的 shield 字段完全独立。
+        spawnProtect: Math.round(p.spawnProtectRemaining * 10) / 10,
+        // 重生动画剩余秒数（保留 2 位小数）：>0 表示坦克还在凝聚、没有实体，
+        // 客户端据此画"放大 + 半透明"的出生动画；0 表示已经正常出现。
+        spawnAnim: Math.round(p.spawnAnimRemaining * 100) / 100,
+      })),
+      bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
+      items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
+      spectators: this.spectatorList(),
+    };
   }
 
   startRound() {
@@ -342,19 +427,13 @@ class Room {
       // 弹药和血量一样每回合重置：开局满弹，装填进度清零
       p.ammo = AMMO_MAX;
       p.ammoReloadAcc = 0;
-      // 每回合开局都重新给满 3 秒出生保护，开火会提前结束（见 tick 的射击分支）
+      // 每回合开局都重新给满 3 秒出生保护，开火会提前结束（见 tick 的射击分支）。
+      // 保护倒计时先冻结，等 0.75 秒重生动画播完、坦克真正出现后才开始走。
       p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
+      p.spawnAnimRemaining = SPAWN_MATERIALIZE_TIME;
     });
 
-    this.broadcast({
-      type: 'game_start',
-      maze: { wallsV: this.maze.wallsV, wallsH: this.maze.wallsH, cell: CELL, cols: this.cols, rows: this.rows, wallThick: WALL_THICK },
-      players: this.playerList(),
-      worldW: this.worldW,
-      worldH: this.worldH,
-      mapSize: this.mapSize,
-      maxHp: this.maxHp,
-    });
+    this.broadcast(this.gameStartMessage());
 
     if (!this.tickHandle) {
       this.tickHandle = setInterval(() => this.tick(), 1000 / TICK_RATE);
@@ -368,6 +447,17 @@ class Room {
     // --- 坦克移动 ---
     for (const p of alivePlayers) {
       const input = p.input;
+
+      // 重生动画：刚开局的 0.75 秒里坦克还没有实体，不响应输入，出生保护的倒计时也冻结。
+      // 动画播完的这一帧把保护重置为满值，从下一帧开始正常计时。
+      if (p.spawnAnimRemaining > 0) {
+        p.spawnAnimRemaining = Math.max(0, p.spawnAnimRemaining - DT);
+        if (p.spawnAnimRemaining < 1e-6) {
+          p.spawnAnimRemaining = 0;
+          p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
+        }
+        continue;
+      }
 
       // 出生保护：只按时间递减；开火会立即清零（见下面的射击分支），所以无敌可能在 3 秒前结束
       if (p.spawnProtectRemaining > 0) {
@@ -463,7 +553,9 @@ class Room {
 
     // 坦克各自移动完之后，再统一处理坦克间的重叠：谁都不允许穿过谁，
     // 而是互相往对方相反方向各推开重叠量的一半，做出"推挤"的手感。
-    this.resolveTankCollisions(alivePlayers);
+    // 重生动画中的坦克没有实体，不参与推挤、拾取、索敌和受击，下面统一用 solidPlayers。
+    const solidPlayers = alivePlayers.filter((p) => p.spawnAnimRemaining <= 0);
+    this.resolveTankCollisions(solidPlayers);
 
     // --- 道具刷新 ---
     // 不管场上现在有几个道具、也不管是不是处于残局观察期，每隔 ITEM_SPAWN_INTERVAL 秒
@@ -497,7 +589,7 @@ class Room {
       const remainingItems = [];
       for (const it of this.items) {
         let takenBy = null;
-        for (const p of alivePlayers) {
+        for (const p of solidPlayers) {
           const dx = p.x - it.x;
           const dy = p.y - it.y;
           if (dx * dx + dy * dy < (TANK_RADIUS + ITEM_RADIUS) * (TANK_RADIUS + ITEM_RADIUS)) {
@@ -540,7 +632,7 @@ class Room {
       if (b.homing) {
         let target = null;
         let bestDist2 = Infinity;
-        for (const p of alivePlayers) {
+        for (const p of solidPlayers) {
           if (p.id === b.owner) continue;
           const ddx = p.x - b.x;
           const ddy = p.y - b.y;
@@ -577,7 +669,7 @@ class Room {
           break;
         }
 
-        for (const p of alivePlayers) {
+        for (const p of solidPlayers) {
           if (b.owner === p.id && b.age < BULLET_OWNER_GRACE) continue;
           const ddx = b.x - p.x;
           const ddy = b.y - p.y;
@@ -643,29 +735,7 @@ class Room {
     }
 
     // --- 广播状态 ---
-    this.broadcast({
-      type: 'state',
-      tanks: [...this.players.values()].map((p) => ({
-        id: p.id,
-        x: p.x,
-        y: p.y,
-        angle: p.angle,
-        alive: p.alive,
-        hp: p.hp,
-        color: p.color,
-        name: p.name,
-        shield: p.shield,
-        speedBoost: p.speedBoostRemaining > 0,
-        tripleReady: p.tripleReady,
-        homingReady: p.homingReady,
-        invisible: p.invisibleRemaining > 0,
-        // 出生保护剩余秒数（保留 1 位小数）：客户端用它画光环进度弧，
-        // 0 表示没有保护；和道具护盾的 shield 字段完全独立。
-        spawnProtect: Math.round(p.spawnProtectRemaining * 10) / 10,
-      })),
-      bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
-      items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
-    });
+    this.broadcast(this.stateMessage());
 
     // --- 回合结束判断 ---
     // 只剩 1 人（或恰好 0 人，双方同归于尽）存活时不立即结束回合，而是进入 5 秒观察期：
@@ -747,21 +817,78 @@ class Room {
     if (winner) winner.score += 1;
 
     const scores = this.playerList();
-    this.broadcast({ type: 'round_end', winnerId: winner ? winner.id : null, scores });
-
     const champion = scores.find((s) => s.score >= WIN_SCORE);
-    setTimeout(() => {
+    // final 表示这局结束后整场比赛就结束了：冠军已产生，或人数已经不够再开一局。
+    // 客户端拿它区分结算文案，避免决胜回合先显示"下一回合即将开始"、3 秒后又跳成"即将返回房间"。
+    this.broadcast({
+      type: 'round_end',
+      winnerId: winner ? winner.id : null,
+      scores,
+      spectators: this.spectatorList(),
+      final: Boolean(champion) || this.players.size < 2,
+    });
+    broadcastRoomList(); // 回合结算期间不算"等待中"，列表状态同步更新
+
+    this.roundEndTimeout = setTimeout(() => {
+      this.roundEndTimeout = null;
       if (!rooms.has(this.code)) return; // 房间已销毁
-      if (champion) {
-        this.state = 'lobby';
-        this.broadcast({ type: 'match_end', winnerId: champion.id, scores: this.playerList() });
-      } else if (this.players.size >= 2) {
-        this.state = 'playing';
-        this.startRound();
-      } else {
-        this.state = 'lobby';
-      }
+      this.advanceAfterRound(champion);
     }, ROUND_RESTART_DELAY);
+  }
+
+  // 整场比赛结束：清掉定时器、回到大厅，并把等待中的观战者转正。
+  promoteSpectators() {
+    if (this.spectators.size === 0) return;
+    for (const s of this.spectators.values()) {
+      const p = makePlayer(s.id, s.name, s.ws, this);
+      this.players.set(p.id, p);
+    }
+    this.spectators.clear();
+    if (!this.hostId || !this.players.has(this.hostId)) {
+      this.hostId = [...this.players.keys()][0] || null;
+    }
+  }
+
+  // 人数不足、最后一名正式玩家离开等情况下提前结束整场比赛。
+  finishMatch(reason) {
+    this.stopTicking();
+    this.state = 'lobby';
+    this.promoteSpectators();
+    this.broadcast({
+      type: 'match_end',
+      winnerId: null,
+      scores: this.playerList(),
+      hostId: this.hostId,
+      spectators: [],
+      reason,
+    });
+    this.broadcastRoom();
+  }
+
+  // 结算展示结束后的去向：产生冠军、或人数不足都回大厅，否则开下一局。
+  advanceAfterRound(champion) {
+    if (champion) {
+      this.stopTicking();
+      this.state = 'lobby';
+      this.promoteSpectators();
+      this.broadcast({
+        type: 'match_end',
+        winnerId: champion.id,
+        scores: this.playerList(),
+        hostId: this.hostId,
+        spectators: [],
+      });
+      this.broadcastRoom();
+    } else if (this.players.size >= 2) {
+      this.state = 'playing';
+      this.startRound();
+    } else {
+      // 有人在结算展示期间退出、人数不够开下一局：也必须广播 match_end，
+      // 否则剩下的玩家会一直停在"下一回合即将开始…"的遮罩上，等不到任何后续消息。
+      this.finishMatch('not_enough_players');
+    }
+    // 回到大厅或开下一局都会影响房间列表里的状态与人数，统一在分支结束后同步一次。
+    broadcastRoomList();
   }
 
   stopTicking() {
@@ -772,6 +899,10 @@ class Room {
     if (this.pendingTimeout) {
       clearTimeout(this.pendingTimeout);
       this.pendingTimeout = null;
+    }
+    if (this.roundEndTimeout) {
+      clearTimeout(this.roundEndTimeout);
+      this.roundEndTimeout = null;
     }
   }
 }
@@ -812,9 +943,48 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
+// ---------- 房间列表 ----------
+// 房间列表只暴露"选房间"需要的信息；地图档位、初始血量等游戏设置属于房间内部状态，
+// 不进列表、也不随列表同步，避免把列表变成第二份需要保持一致的游戏配置。
+function roomSummary(room) {
+  const host = room.hostId ? room.players.get(room.hostId) : null;
+  return {
+    code: room.code,
+    name: room.name,
+    // 列表里的"人数"包含正式玩家和观战者，与 7 人上限保持一致。
+    playerCount: room.memberCount(),
+    maxPlayers: MAX_PLAYERS,
+    state: room.state,
+    hostName: host ? host.name : '',
+  };
+}
+
+function roomListPayload() {
+  return [...rooms.values()]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(roomSummary);
+}
+
+function sendRoomList(ws) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'room_list', rooms: roomListPayload() }));
+}
+
+// 只推给"当前不在任何房间里"的连接；进入房间后 _roomCode 有值，就不再收列表广播。
+function broadcastRoomList() {
+  const data = JSON.stringify({ type: 'room_list', rooms: roomListPayload() });
+  for (const ws of wss.clients) {
+    if (ws.readyState === WebSocket.OPEN && !ws._roomCode) ws.send(data);
+  }
+}
+
 wss.on('connection', (ws) => {
   let currentRoom = null;
   let playerId = null;
+
+  ws._roomCode = null;
+  // 连上就推一份，客户端点"开始游戏"后不用等自己的 list_rooms 请求往返。
+  sendRoomList(ws);
 
   ws.on('message', (raw) => {
     let msg;
@@ -824,58 +994,91 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.type === 'list_rooms') {
+      sendRoomList(ws);
+      return;
+    }
+
     if (msg.type === 'create_room') {
+      if (currentRoom) {
+        ws.send(JSON.stringify({ type: 'error', message: '你已经在房间里了，请先离开当前房间' }));
+        return;
+      }
+      const roomName = sanitizeRoomName(msg.roomName);
+      if (!roomName) {
+        ws.send(JSON.stringify({ type: 'error', message: '请先填写房间名' }));
+        return;
+      }
       const code = makeRoomCode();
-      const room = new Room(code);
+      const room = new Room(code, roomName);
       rooms.set(code, room);
       room.joinCounter += 1;
       const name = sanitizeName(msg.name, room.joinCounter);
       playerId = makeId();
-      const player = {
-        id: playerId, name, ws, color: room.assignColor(),
-        score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
-        input: { forward: false, backward: false, left: false, right: false, shoot: false },
-        shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
-        spawnProtectRemaining: 0,
-        ammo: AMMO_MAX, ammoReloadAcc: 0,
-      };
+      const player = makePlayer(playerId, name, ws, room);
       room.players.set(playerId, player);
       room.hostId = playerId;
       currentRoom = room;
-      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList(), mapSize: room.mapSize, maxHp: room.maxHp }));
+      ws._roomCode = code;
+      ws.send(JSON.stringify({
+        type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
+        spectating: false, players: room.playerList(), spectators: [],
+        mapSize: room.mapSize, maxHp: room.maxHp,
+      }));
+      broadcastRoomList();
       return;
     }
 
     if (msg.type === 'join_room') {
+      if (currentRoom) {
+        ws.send(JSON.stringify({ type: 'error', message: '你已经在房间里了，请先离开当前房间' }));
+        return;
+      }
       const code = String(msg.code || '').toUpperCase().trim();
       const room = rooms.get(code);
       if (!room) {
         ws.send(JSON.stringify({ type: 'error', message: '房间不存在，请检查房间码' }));
         return;
       }
-      if (room.players.size >= MAX_PLAYERS) {
+      if (room.memberCount() >= MAX_PLAYERS) {
         ws.send(JSON.stringify({ type: 'error', message: `房间已满（最多${MAX_PLAYERS}人）` }));
         return;
       }
-      if (room.state === 'playing' || room.state === 'round_pending') {
-        ws.send(JSON.stringify({ type: 'error', message: '该房间正在游戏中，请等待本局结束' }));
-        return;
-      }
+
       room.joinCounter += 1;
       const name = sanitizeName(msg.name, room.joinCounter);
+
+      // 游戏中加入：先进入观战席，不占出生点、不计分；整场比赛结束后统一转正。
+      if (room.state !== 'lobby') {
+        playerId = makeId();
+        room.spectators.set(playerId, { id: playerId, name, ws });
+        currentRoom = room;
+        ws._roomCode = code;
+        ws.send(JSON.stringify({
+          type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
+          spectating: true, players: room.playerList(), spectators: room.spectatorList(),
+          mapSize: room.mapSize, maxHp: room.maxHp,
+        }));
+        // 补发当前迷宫和状态，观战者不用等下一帧也能立即看到完整对局。
+        ws.send(JSON.stringify(room.gameStartMessage({ spectating: true })));
+        ws.send(JSON.stringify(room.stateMessage()));
+        room.broadcastRoom();
+        broadcastRoomList();
+        return;
+      }
+
       playerId = makeId();
-      const player = {
-        id: playerId, name, ws, color: room.assignColor(),
-        score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
-        input: { forward: false, backward: false, left: false, right: false, shoot: false },
-        shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
-        spawnProtectRemaining: 0,
-        ammo: AMMO_MAX, ammoReloadAcc: 0,
-      };
+      const player = makePlayer(playerId, name, ws, room);
       room.players.set(playerId, player);
       currentRoom = room;
-      ws.send(JSON.stringify({ type: 'joined', code, playerId, hostId: room.hostId, players: room.playerList(), mapSize: room.mapSize, maxHp: room.maxHp }));
+      ws._roomCode = code;
+      ws.send(JSON.stringify({
+        type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
+        spectating: false, players: room.playerList(), spectators: room.spectatorList(),
+        mapSize: room.mapSize, maxHp: room.maxHp,
+      }));
       room.broadcastRoom();
+      broadcastRoomList();
       return;
     }
 
@@ -965,22 +1168,48 @@ wss.on('connection', (ws) => {
   function handleLeave() {
     if (!currentRoom || !playerId) return;
     const room = currentRoom;
-    room.players.delete(playerId);
+    ws._roomCode = null;
+    const wasPlayer = room.players.delete(playerId);
+    const wasSpectator = room.spectators.delete(playerId);
+    if (!wasPlayer && !wasSpectator) {
+      currentRoom = null;
+      playerId = null;
+      return;
+    }
 
-    if (room.players.size === 0) {
-      room.stopTicking();
-      rooms.delete(room.code);
-    } else {
-      if (room.hostId === playerId) {
+    if (wasPlayer) {
+      if (room.hostId === playerId && room.players.size > 0) {
         room.hostId = [...room.players.keys()][0];
       }
-      room.broadcastRoom();
-      if ((room.state === 'playing' || room.state === 'round_pending') && room.players.size < 2) {
-        room.stopTicking();
-        room.state = 'lobby';
-        room.broadcast({ type: 'match_end', winnerId: null, scores: room.playerList(), reason: 'not_enough_players' });
+      if (room.players.size === 0) {
+        // 最后一名正式玩家离开：如果还有观战者，房间保留并让他们转正；否则销毁房间。
+        if (room.spectators.size > 0) {
+          room.finishMatch('not_enough_players');
+        } else {
+          room.stopTicking();
+          rooms.delete(room.code);
+        }
+      } else if (room.state !== 'lobby' && room.players.size < 2) {
+        // 人数不够继续比赛：提前结束整场，观战者一并转正回大厅。
+        room.finishMatch('not_enough_players');
+      } else {
+        room.broadcastRoom();
+      }
+    } else {
+      // 观战者离开只影响名单，不影响对局。
+      if (room.players.size === 0) {
+        if (room.spectators.size === 0) {
+          room.stopTicking();
+          rooms.delete(room.code);
+        } else {
+          room.finishMatch('not_enough_players');
+        }
+      } else {
+        room.broadcastRoom();
       }
     }
+
+    broadcastRoomList();
     currentRoom = null;
     playerId = null;
   }
@@ -989,6 +1218,13 @@ wss.on('connection', (ws) => {
 function sanitizeName(name, fallbackNumber) {
   const n = String(name || '').trim().slice(0, 12);
   return n.length ? n : `玩家 ${fallbackNumber}`;
+}
+
+function sanitizeRoomName(name) {
+  return String(name || '')
+    .replace(/[\u0000-\u001F\u007F]/g, '') // 去掉换行等控制字符，防止列表排版被破坏
+    .trim()
+    .slice(0, MAX_ROOM_NAME);
 }
 
 // 直接 `node server.js` 时才真正监听端口；被测试 require 时只导出 Room 等符号，
@@ -1003,8 +1239,10 @@ if (require.main === module) {
 module.exports = {
   Room,
   MAX_PLAYERS,
+  MAX_ROOM_NAME,
   PLAYER_COLORS,
   SPAWN_PROTECT_TIME,
+  SPAWN_MATERIALIZE_TIME,
   MAP_PRESETS,
   CELL,
   TANK_RADIUS,
