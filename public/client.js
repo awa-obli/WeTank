@@ -4,6 +4,7 @@
   // ---------- 视图切换 ----------
   const views = {
     landing: document.getElementById('view-landing'),
+    settings: document.getElementById('view-settings'),
     rooms: document.getElementById('view-rooms'),
     lobby: document.getElementById('view-lobby'),
     game: document.getElementById('view-game'),
@@ -16,6 +17,10 @@
   const nicknameEl = document.getElementById('nickname');
   const btnEnterRooms = document.getElementById('btn-enter-rooms');
   const landingError = document.getElementById('landing-error');
+  const btnOpenSettings = document.getElementById('btn-open-settings');
+  const btnSettingsBack = document.getElementById('btn-settings-back');
+  const controlPicker = document.getElementById('control-picker');
+  const controlDescEl = document.getElementById('control-desc');
 
   const roomsListEl = document.getElementById('rooms-list');
   const roomsEmptyEl = document.getElementById('rooms-empty');
@@ -40,6 +45,7 @@
   const lobbyCodeEl = document.getElementById('lobby-code');
   const lobbyPlayersEl = document.getElementById('lobby-players');
   const mapPickerEl = document.getElementById('map-picker');
+  const mapTypePickerEl = document.getElementById('map-type-picker');
   const hpInputEl = document.getElementById('hp-input');
   const btnHpMinus = document.getElementById('btn-hp-minus');
   const btnHpPlus = document.getElementById('btn-hp-plus');
@@ -98,7 +104,15 @@
   let matchIntroTimer = null;
   let matchIntroHideTimer = null;
   const NICKNAME_KEY = 'tank.nickname';
+  // 触屏虚拟按键的控制方式：joystick=摇杆（默认）/ dpad=十字键，只保存在本机
+  const CONTROL_MODE_KEY = 'tank.controlMode';
+  const CONTROL_MODE_INFO = {
+    joystick: '拖动摇杆指向想去的方向，坦克会自动转向；用右侧「移动/静止」切换前进或只转向。',
+    dpad: '十字键：◀ ▶ 原地转向，▲ 前进，▼ 后退。上下键直接控制前进/后退，不需要「移动/静止」切换。',
+  };
+  let controlMode = 'joystick';
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
+  let mapType = 'maze'; // 房间级设置：maze/open/symmetric/scatter/random，以服务端广播为准
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
   let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ team=团队模式 / classic=经典模式
   let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
@@ -130,6 +144,15 @@
     { key: 'small', name: '小', cols: 9, rows: 6 },
     { key: 'medium', name: '中', cols: 12, rows: 8 },
     { key: 'large', name: '大', cols: 15, rows: 10 },
+  ];
+  // 与服务端 MAP_TYPES 一一对应：这里只用 key 发请求、用名称/摘要做展示，
+  // 真正的墙体和碰撞数据以服务端 game_start 广播的 maze 为准。
+  const MAP_TYPE_OPTIONS = [
+    { key: 'maze', name: '迷宫', desc: '随机通道' },
+    { key: 'open', name: '空旷', desc: '无内墙' },
+    { key: 'symmetric', name: '对称', desc: '中心堡垒' },
+    { key: 'scatter', name: '散块', desc: '随机短墙' },
+    { key: 'random', name: '随机', desc: '每回合抽一种' },
   ];
   // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式沿用大乱斗的复活节奏，
   // 经典模式保留原有的淘汰制玩法。
@@ -363,7 +386,13 @@
     });
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeAllModals();
+    if (e.key !== 'Escape') return;
+    // 设置页用 Esc 返回开始页，比弹窗关闭优先
+    if (!views.settings.classList.contains('hidden')) {
+      showView('landing');
+      return;
+    }
+    closeAllModals();
   });
 
   btnStart.addEventListener('click', () => send({ type: 'start_game' }));
@@ -403,6 +432,7 @@
         myTeam = null;
         // 中途加入的观战者不播开局公告；只有以玩家身份进入下一场时才欠一次展示。
         matchIntroPending = !spectating;
+        mapType = msg.mapType || 'maze';
         mapSize = msg.mapSize || 'medium';
         maxHp = msg.maxHp || 5;
         syncModeSettings(msg);
@@ -445,6 +475,7 @@
           if (players.some((p) => p.id === myId)) spectating = false;
           else if (spectators.some((s) => s.id === myId)) spectating = true;
         }
+        mapType = msg.mapType || mapType;
         mapSize = msg.mapSize || mapSize;
         maxHp = msg.maxHp || maxHp;
         syncModeSettings(msg);
@@ -463,6 +494,7 @@
         maze = msg.maze;
         worldW = msg.worldW;
         worldH = msg.worldH;
+        mapType = msg.mapType || mapType;
         maxHp = msg.maxHp || maxHp;
         syncModeSettings(msg);
         spawnAnimTime = msg.spawnMaterialize || spawnAnimTime; // 重生动画总时长，与服务端保持一致
@@ -952,11 +984,44 @@
     }
 
     renderModePicker();
+    renderMapTypePicker();
     renderMapPicker();
     renderHpSetting();
     renderKillTargetSetting();
     renderWinScoreSetting();
     renderTeamSetting();
+  }
+
+  // 大厅右侧的地图类型选择：房主可点，其他玩家只能看到当前类型（按钮禁用，保持只读）。
+  // 和地图大小一样不做本地乐观更新，点击后等服务端 room_update 回来再改高亮。
+  function renderMapTypePicker() {
+    const amHost = myId === hostId;
+    mapTypePickerEl.innerHTML = '';
+    MAP_TYPE_OPTIONS.forEach((opt) => {
+      const isActive = opt.key === mapType;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'map-type-option' + (isActive ? ' active' : '');
+      btn.dataset.mapType = opt.key;
+      btn.disabled = !amHost;
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+      const name = document.createElement('span');
+      name.className = 'map-type-option-name';
+      name.textContent = opt.name;
+
+      const desc = document.createElement('span');
+      desc.className = 'map-type-option-desc';
+      desc.textContent = opt.desc;
+
+      btn.appendChild(name);
+      btn.appendChild(desc);
+      btn.addEventListener('click', () => {
+        if (myId !== hostId || mapType === opt.key) return;
+        send({ type: 'set_map_type', mapType: opt.key });
+      });
+      mapTypePickerEl.appendChild(btn);
+    });
   }
 
   // 大厅右侧的地图大小选择：房主可点，其他玩家只能看到当前档位（按钮禁用，保持只读）。
@@ -1954,6 +2019,7 @@
       lastUseBackward = false;
       if (resetJoystickDrag) resetJoystickDrag();
       if (resetFireButton) resetFireButton();
+      if (resetDpadPointers) resetDpadPointers();
       keyState.forward = false;
       keyState.backward = false;
       keyState.left = false;
@@ -1974,6 +2040,7 @@
       lastUseBackward = false;
       if (resetJoystickDrag) resetJoystickDrag(); // 手还按在摇杆上时也要松开，否则复活后摇杆不响应
       if (resetFireButton) resetFireButton(); // 开火键同理
+      if (resetDpadPointers) resetDpadPointers(); // 十字键也松开，避免复活后方向键一直按着
       keyState.forward = false;
       keyState.backward = false;
       keyState.left = false;
@@ -2014,6 +2081,7 @@
   let joystickVector = null; // {x, y}，归一化到 -1..1；居中/松开时为 null
   let resetJoystickDrag = null; // 由 setupJoystick 赋值：阵亡时强制松开摇杆、释放指针捕获
   let resetFireButton = null; // 由 setupFireButton 赋值：阵亡时强制松开开火键、释放指针捕获
+  let resetDpadPointers = null; // 由 setupDpad 赋值：阵亡/切换方式时强制松开所有十字键
   let isMoving = true;       // false=静止(只转向)，true=移动(前进/倒退)；由 btn-move-toggle 切换，默认移动态
   let lastUseBackward = false; // 上一帧是否处于倒退，用于滞回判断；松开摇杆/切静止/坦克未就绪时重置
   const JOY_DEADZONE = 0.25;    // 摇杆推动幅度小于此值时视为居中，不移动、不转向
@@ -2028,6 +2096,7 @@
 
   function applyJoystickSteering() {
     if (!isTouchDevice) return;
+    if (controlMode !== 'joystick') return; // 十字键模式下由按键直接控制，不做摇杆的智能转向
     if (!joystickVector) return; // 松开摇杆的情况在 endDrag 里已经单独清过 keyState，这里不用重复处理
 
     const mag = Math.hypot(joystickVector.x, joystickVector.y);
@@ -2215,15 +2284,127 @@
     };
   }
 
-  // 必须放在 setupJoystick / setupMoveToggle / setupFireButton 以及它们依赖的
-  // let/const（isMoving、joystickVector、JOY_DEADZONE 等）声明之后再调用：
-  // 这几个 setup 函数里有的会在调用时立刻读取这些变量，如果它们的声明语句还没
-  // 执行到（哪怕函数本身已经被提升），会因为 TDZ 直接抛错，导致后面的代码全部
-  // 不执行，包括 draw()，表现为地图怎么都画不出来。
+  // ---------- 十字键（触屏虚拟按键的另一种控制方式） ----------
+  function setupDpad() {
+    const keys = Array.from(document.querySelectorAll('.dpad-key'));
+    const pointers = new Map(); // pointerId -> { btn, dir }，支持多指同时按住不同方向
+    const dirCounts = { forward: 0, backward: 0, left: 0, right: 0 };
+
+    function press(e) {
+      const btn = e.currentTarget;
+      const dir = btn.dataset.dir;
+      if (!dir || pointers.has(e.pointerId)) return;
+      e.preventDefault();
+      pointers.set(e.pointerId, { btn, dir });
+      dirCounts[dir] += 1;
+      try {
+        btn.setPointerCapture(e.pointerId);
+      } catch (err) {
+        // 个别浏览器不支持指针捕获时忽略，pointerup 仍然能正常结束
+      }
+      btn.classList.add('active');
+      keyState[dir] = true;
+      updateInput();
+    }
+
+    function release(e) {
+      const rec = pointers.get(e.pointerId);
+      if (!rec) return;
+      pointers.delete(e.pointerId);
+      dirCounts[rec.dir] = Math.max(0, dirCounts[rec.dir] - 1);
+      if (dirCounts[rec.dir] === 0) {
+        rec.btn.classList.remove('active');
+        keyState[rec.dir] = false;
+        updateInput();
+      }
+    }
+
+    keys.forEach((btn) => {
+      btn.addEventListener('pointerdown', press);
+      btn.addEventListener('pointerup', release);
+      btn.addEventListener('pointercancel', release);
+      // 指针捕获被系统收走（来电、切后台等）时也要松开，避免按键卡住
+      btn.addEventListener('lostpointercapture', release);
+    });
+
+    // 阵亡 / 观战 / 切换控制方式时统一松开：控件隐藏后 pointerup 可能收不到
+    resetDpadPointers = function () {
+      let changed = false;
+      pointers.forEach((rec, id) => {
+        try {
+          rec.btn.releasePointerCapture(id);
+        } catch (e) {
+          // 指针已经不在捕获状态，忽略即可
+        }
+        if (keyState[rec.dir]) changed = true;
+        keyState[rec.dir] = false;
+      });
+      pointers.clear();
+      for (const dir in dirCounts) dirCounts[dir] = 0;
+      keys.forEach((btn) => btn.classList.remove('active'));
+      if (changed) updateInput();
+    };
+  }
+
+  // ---------- 设置页：控制方式切换 ----------
+  function applyControlMode(next, persist) {
+    controlMode = next === 'dpad' ? 'dpad' : 'joystick';
+    document.body.classList.toggle('control-dpad', controlMode === 'dpad');
+    document.body.classList.toggle('control-joystick', controlMode === 'joystick');
+    controlPicker.querySelectorAll('.control-option').forEach((btn) => {
+      const on = btn.dataset.control === controlMode;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+    controlDescEl.textContent = CONTROL_MODE_INFO[controlMode];
+
+    // 切换时清空两种虚拟控件的残留输入，避免切过去以后还带着旧按键
+    if (resetDpadPointers) resetDpadPointers();
+    if (resetJoystickDrag) resetJoystickDrag();
+    joystickVector = null;
+    lastUseBackward = false;
+    keyState.forward = false;
+    keyState.backward = false;
+    keyState.left = false;
+    keyState.right = false;
+    updateInput();
+
+    if (persist) {
+      try {
+        localStorage.setItem(CONTROL_MODE_KEY, controlMode);
+      } catch (e) {
+        // 隐私模式下存储失败也不影响本次使用
+      }
+    }
+  }
+
+  btnOpenSettings.addEventListener('click', () => {
+    landingErrorShow('');
+    showView('settings');
+  });
+  btnSettingsBack.addEventListener('click', () => showView('landing'));
+  controlPicker.addEventListener('click', (e) => {
+    const btn = e.target.closest('.control-option');
+    if (!btn) return;
+    applyControlMode(btn.dataset.control, true);
+  });
+
+  // 读取上次保存的控制方式（默认摇杆），再初始化触屏控件。
+  // 这些调用必须放在 joystickVector / resetJoystickDrag / resetDpadPointers 等
+  // let 声明之后，否则会因 TDZ 抛错。
+  try {
+    const savedControlMode = localStorage.getItem(CONTROL_MODE_KEY);
+    if (savedControlMode === 'dpad' || savedControlMode === 'joystick') controlMode = savedControlMode;
+  } catch (e) {
+    // localStorage 不可用时保持默认
+  }
+  applyControlMode(controlMode, false);
+
   if (isTouchDevice) {
     document.body.classList.add('is-touch');
     setupJoystick();
     setupMoveToggle();
     setupFireButton();
+    setupDpad();
   }
 })();

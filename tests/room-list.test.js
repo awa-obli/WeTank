@@ -82,8 +82,12 @@ async function main() {
   check(room.name === '周末欢乐局', `列表显示房间名（实际 ${room.name}）`);
   check(room.playerCount === 1 && room.maxPlayers === 10, `列表显示人数（实际 ${room.playerCount}/${room.maxPlayers}）`);
   check(room.state === 'lobby', `列表显示等待状态（实际 ${room.state}）`);
-  check(!Object.prototype.hasOwnProperty.call(room, 'mapSize') && !Object.prototype.hasOwnProperty.call(room, 'maxHp'),
-    '列表不携带地图档位 / 初始血量');
+  check(
+    !Object.prototype.hasOwnProperty.call(room, 'mapType')
+      && !Object.prototype.hasOwnProperty.call(room, 'mapSize')
+      && !Object.prototype.hasOwnProperty.call(room, 'maxHp'),
+    '列表不携带地图类型 / 地图档位 / 初始血量'
+  );
 
   // ---------- 加入后人数更新 ----------
   const guest = await connect();

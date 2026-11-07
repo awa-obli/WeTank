@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const WebSocket = require('ws');
 const physics = require('./physics');
 const { pickSpawnCells, pickRespawnCell } = require('./spawn');
+const { generateMap } = require('./maps');
 
 // ---------- 常量配置 ----------
 const PORT = process.env.PORT || 8080;
@@ -16,7 +17,7 @@ const CELL = 80;
 const WALL_THICK = 10;
 
 // ---------- 地图尺寸 ----------
-// 房间级设置：房主在大厅里选择，开局时按当前档位生成迷宫。
+// 房间级设置：房主在大厅里选择，开局时按当前类型/档位生成地图。
 // 三档统一保持 3:2 的宽高比（720×480 / 960×640 / 1200×800），
 // 客户端画布随 worldW/worldH 自适应缩放时宽高比不会跳变。
 const MAP_PRESETS = {
@@ -25,6 +26,18 @@ const MAP_PRESETS = {
   large: { cols: 15, rows: 10 },
 };
 const DEFAULT_MAP_SIZE = 'medium';
+
+// ---------- 地图类型 ----------
+// 地图类型和地图大小是两个独立设置：类型决定布局，大小决定网格尺寸。
+// maze 是原有默认值，保证老客户端/旧房间行为不变；random 每回合从其余四种里随机抽一种。
+const MAP_TYPES = {
+  maze: { key: 'maze', name: '迷宫' },
+  open: { key: 'open', name: '空旷' },
+  symmetric: { key: 'symmetric', name: '对称' },
+  scatter: { key: 'scatter', name: '散块' },
+  random: { key: 'random', name: '随机' },
+};
+const DEFAULT_MAP_TYPE = 'maze';
 
 const TANK_RADIUS = 15;
 const TANK_SPEED = 100;       // 前进 px/s
@@ -178,7 +191,7 @@ function makePlayer(id, name, ws, room) {
 }
 
 // 在网格里随机挑一个格子的中心点作为道具生成位置。
-// 墙体都生成在格子的边界上（见 generateMaze），格子中心永远是空地，不用再做碰撞检测。
+// 墙体都生成在格子的边界上（见 maps.js），格子中心永远是空地，不用再做碰撞检测。
 // 尽量避开已经放了道具的格子，避免两个道具重叠在同一个点；
 // 格子数量有限，找不到空位时就放弃这次尝试，等下一轮 15 秒再刷。
 function pickRandomItemCell(occupiedCells, cols, rows) {
@@ -194,102 +207,9 @@ function pickRandomItemCell(occupiedCells, cols, rows) {
   return null;
 }
 
-// ---------- 迷宫生成 ----------
-// wallsV[r][c] = 第 c 列和第 c+1 列之间(在第 r 行)是否有墙, c: 0..cols-2
-// wallsH[r][c] = 第 r 行和第 r+1 行之间(在第 c 列)是否有墙, r: 0..rows-2
-// 行列数由本局房间选择的地图档位决定，世界尺寸也随之变化。
-function generateMaze(cols, rows) {
-  const worldW = cols * CELL;
-  const worldH = rows * CELL;
-  const wallsV = Array.from({ length: rows }, () => Array(cols - 1).fill(true));
-  const wallsH = Array.from({ length: rows - 1 }, () => Array(cols).fill(true));
-  const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
-
-  function neighbors(r, c) {
-    const list = [];
-    if (r > 0) list.push([r - 1, c, 'H', r - 1, c]);
-    if (r < rows - 1) list.push([r + 1, c, 'H', r, c]);
-    if (c > 0) list.push([r, c - 1, 'V', r, c - 1]);
-    if (c < cols - 1) list.push([r, c + 1, 'V', r, c]);
-    return list;
-  }
-
-  function shuffle(arr) {
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
-  }
-
-  // 随机深度优先(迭代栈)生成完美迷宫
-  const stack = [[0, 0]];
-  visited[0][0] = true;
-  while (stack.length > 0) {
-    const [r, c] = stack[stack.length - 1];
-    const opts = shuffle(neighbors(r, c)).filter(([nr, nc]) => !visited[nr][nc]);
-    if (opts.length === 0) {
-      stack.pop();
-      continue;
-    }
-    const [nr, nc, orient, wr, wc] = opts[0];
-    if (orient === 'H') wallsH[wr][wc] = false;
-    else wallsV[wr][wc] = false;
-    visited[nr][nc] = true;
-    stack.push([nr, nc]);
-  }
-
-  // 打通一些额外的墙，制造环路，避免纯树形死胡同太多
-  const extraRemovals = Math.floor(cols * rows * 0.12);
-  for (let i = 0; i < extraRemovals; i++) {
-    if (Math.random() < 0.5) {
-      const r = Math.floor(Math.random() * rows);
-      const c = Math.floor(Math.random() * (cols - 1));
-      wallsV[r][c] = false;
-    } else {
-      const r = Math.floor(Math.random() * (rows - 1));
-      const c = Math.floor(Math.random() * cols);
-      wallsH[r][c] = false;
-    }
-  }
-
-  // 转换为矩形墙体列表，用于碰撞检测
-  const rects = [];
-  const OVERLAP = WALL_THICK / 2;
-
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols - 1; c++) {
-      if (wallsV[r][c]) {
-        rects.push({
-          cx: (c + 1) * CELL,
-          cy: r * CELL + CELL / 2,
-          hw: WALL_THICK / 2,
-          hh: CELL / 2 + OVERLAP,
-        });
-      }
-    }
-  }
-  for (let r = 0; r < rows - 1; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (wallsH[r][c]) {
-        rects.push({
-          cx: c * CELL + CELL / 2,
-          cy: (r + 1) * CELL,
-          hw: CELL / 2 + OVERLAP,
-          hh: WALL_THICK / 2,
-        });
-      }
-    }
-  }
-
-  // 外边界
-  rects.push({ cx: worldW / 2, cy: 0, hw: worldW / 2 + WALL_THICK, hh: WALL_THICK / 2 });
-  rects.push({ cx: worldW / 2, cy: worldH, hw: worldW / 2 + WALL_THICK, hh: WALL_THICK / 2 });
-  rects.push({ cx: 0, cy: worldH / 2, hw: WALL_THICK / 2, hh: worldH / 2 + WALL_THICK });
-  rects.push({ cx: worldW, cy: worldH / 2, hw: WALL_THICK / 2, hh: worldH / 2 + WALL_THICK });
-
-  return { rects, wallsV, wallsH };
-}
+// ---------- 地图生成 ----------
+// 具体的迷宫 / 空旷 / 对称 / 散块布局和碰撞矩形都在 maps.js 里生成，
+// 这里只负责按房间设置选类型，并把结果存进 maze。wallsV/wallsH 的坐标约定见 maps.js。
 
 // ---------- 碰撞辅助 ----------
 function clamp(v, min, max) {
@@ -317,7 +237,10 @@ class Room {
     this.items = []; // 场上道具：{ id, type, x, y }
     this.nextItemId = 1;
     this.itemSpawnAcc = 0; // 距离上次刷新道具经过的秒数，累计到 ITEM_SPAWN_INTERVAL 就刷一个
-    // 地图大小与初始血量都是房间级设置：房主在大厅里改，每回合开始时按它生成迷宫/补满血量。
+    // 地图类型/大小与初始血量都是房间级设置：房主在大厅里改，每回合开始时按它生成地图/补满血量。
+    // mapLayout 记录本回合实际使用的布局：mapType 为 random 时它和 mapType 不同。
+    this.mapType = DEFAULT_MAP_TYPE;
+    this.mapLayout = null;
     this.mapSize = DEFAULT_MAP_SIZE;
     this.maxHp = DEFAULT_MAX_HP;
     // 游戏模式与各模式的胜利目标同样是房间级设置，只在大厅可改：
@@ -356,6 +279,7 @@ class Room {
       hostId: this.hostId,
       players: this.playerList(),
       spectators: this.spectatorList(),
+      mapType: this.mapType,
       mapSize: this.mapSize,
       maxHp: this.maxHp,
       mode: this.mode,
@@ -473,6 +397,9 @@ class Room {
       spectators: this.spectatorList(),
       worldW: this.worldW,
       worldH: this.worldH,
+      mapType: this.mapType,
+      // random 时这里才是本回合真正抽中的布局；其他类型与 mapType 相同。
+      mapLayout: this.mapLayout,
       mapSize: this.mapSize,
       maxHp: this.maxHp,
       mode: this.mode,
@@ -529,14 +456,21 @@ class Room {
   }
 
   startRound() {
-    // 每回合都按房间当前的地图大小重新生成，尺寸在世界坐标里是"真"的，
+    // 每回合都按房间当前的地图类型/大小重新生成，尺寸在世界坐标里是"真"的，
     // 坦克碰撞、子弹反弹、边界 clamp 全部直接用这套尺寸，客户端只负责按 worldW/worldH 缩放显示。
     const preset = MAP_PRESETS[this.mapSize];
     this.cols = preset.cols;
     this.rows = preset.rows;
     this.worldW = preset.cols * CELL;
     this.worldH = preset.rows * CELL;
-    this.maze = generateMaze(this.cols, this.rows);
+    const map = generateMap(this.mapType, {
+      cols: this.cols,
+      rows: this.rows,
+      cell: CELL,
+      wallThick: WALL_THICK,
+    });
+    this.mapLayout = map.type;
+    this.maze = { wallsV: map.wallsV, wallsH: map.wallsH, rects: map.rects };
     this.bullets = [];
     this.items = [];
     this.itemSpawnAcc = 0;
@@ -1321,7 +1255,7 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: [],
-        mapSize: room.mapSize, maxHp: room.maxHp,
+        mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
         mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
@@ -1357,7 +1291,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({
           type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
           spectating: true, players: room.playerList(), spectators: room.spectatorList(),
-          mapSize: room.mapSize, maxHp: room.maxHp,
+          mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
           mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
           respawnDelay: BRAWL_RESPAWN_DELAY,
         }));
@@ -1379,7 +1313,7 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: room.spectatorList(),
-        mapSize: room.mapSize, maxHp: room.maxHp,
+        mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
         mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
@@ -1409,6 +1343,30 @@ wss.on('connection', (ws) => {
       }
       if (currentRoom.mapSize !== size) {
         currentRoom.mapSize = size;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_map_type') {
+      // 地图类型和地图大小一样是房主专属、且只在大厅可改：
+      // 对局中换布局会让已经生成的墙体/出生点/子弹坐标对不上。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改地图类型' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改地图类型' }));
+        return;
+      }
+      const mapType = String(msg.mapType || '');
+      // 同样用 hasOwnProperty 防止 'constructor' 之类的原型链 key 混进来。
+      if (!Object.prototype.hasOwnProperty.call(MAP_TYPES, mapType)) {
+        ws.send(JSON.stringify({ type: 'error', message: '无效的地图类型' }));
+        return;
+      }
+      if (currentRoom.mapType !== mapType) {
+        currentRoom.mapType = mapType;
         currentRoom.broadcastRoom();
       }
       return;
@@ -1687,6 +1645,8 @@ module.exports = {
   SPAWN_PROTECT_TIME,
   SPAWN_MATERIALIZE_TIME,
   MAP_PRESETS,
+  MAP_TYPES,
+  DEFAULT_MAP_TYPE,
   MODES,
   DEFAULT_MODE,
   TEAMS,

@@ -12,6 +12,12 @@
 
 <!-- ============ 首屏：开始游戏 ============ -->
 <section id="view-landing" class="view">
+  <button id="btn-open-settings" class="landing-settings" type="button" aria-label="打开设置">
+    <svg class="landing-settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>设置
+  </button>
   <div class="landing-wrap">
     <div class="brand">
       <div class="brand-badge">◪</div>
@@ -27,6 +33,38 @@
     <button id="btn-enter-rooms" class="btn btn-primary btn-start-game">开始游戏</button>
 
     <p id="landing-error" class="error-msg"></p>
+  </div>
+</section>
+
+<!-- ============ 设置 ============ -->
+<section id="view-settings" class="view hidden">
+  <button id="btn-settings-back" class="settings-back" type="button">← 返回</button>
+  <div class="settings-wrap">
+    <header class="settings-head">
+      <h1>设置</h1>
+    </header>
+
+    <div class="settings-panel settings-page-panel">
+      <div class="settings-group">
+        <div class="settings-group-head">
+          <h2 class="settings-group-title">控制方式</h2>
+          <span class="settings-group-badge">仅触屏设备显示</span>
+        </div>
+        <div id="control-picker" class="control-picker" role="radiogroup" aria-label="控制方式">
+          <button class="control-option" type="button" data-control="joystick" role="radio" aria-checked="true">
+            <span class="control-art" aria-hidden="true">◉</span>
+            <span class="control-name">摇杆</span>
+            <span class="control-desc">推杆指向想去的方向</span>
+          </button>
+          <button class="control-option" type="button" data-control="dpad" role="radio" aria-checked="false">
+            <span class="control-art" aria-hidden="true">＋</span>
+            <span class="control-name">十字键</span>
+            <span class="control-desc">左右转向，上下前进后退</span>
+          </button>
+        </div>
+        <p id="control-desc" class="control-desc-main">拖动摇杆指向想去的方向，坦克会自动转向；用右侧「移动/静止」切换前进或只转向。</p>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -120,7 +158,7 @@
         </div>
       </div>
 
-      <!-- 右列：游戏设置（模式与胜负目标、地图大小、初始血量） -->
+      <!-- 右列：游戏设置（模式与胜负目标、地图类型与大小、初始血量） -->
       <aside class="lobby-side">
         <div class="settings-panel">
           <h2 class="settings-title">游戏设置</h2>
@@ -151,6 +189,10 @@
               <input id="win-score-input" class="hp-input" type="number" inputmode="numeric" min="1" max="10" step="1" value="5" autocomplete="off" aria-label="胜利分数（1 到 10）" />
               <button id="btn-win-plus" class="hp-step" type="button" aria-label="增加胜利分数">＋</button>
             </div>
+          </div>
+          <div class="settings-group">
+            <span class="settings-label">地图类型</span>
+            <div id="map-type-picker" class="map-type-picker" role="group" aria-label="地图类型"></div>
           </div>
           <div class="settings-group">
             <span class="settings-label">地图大小</span>
@@ -196,6 +238,14 @@
   <div id="touch-controls" class="touch-controls">
     <div id="joystick-zone" class="joystick-zone">
       <div id="joystick-stick" class="joystick-stick"></div>
+    </div>
+    <!-- 十字键：设置里选「十字键」后替代摇杆显示 -->
+    <div id="dpad" class="dpad" role="group" aria-label="十字方向键">
+      <button id="dpad-up" class="dpad-key" type="button" data-dir="forward" aria-label="前进">▲</button>
+      <button id="dpad-left" class="dpad-key" type="button" data-dir="left" aria-label="左转">◀</button>
+      <span class="dpad-hub" aria-hidden="true"></span>
+      <button id="dpad-right" class="dpad-key" type="button" data-dir="right" aria-label="右转">▶</button>
+      <button id="dpad-down" class="dpad-key" type="button" data-dir="backward" aria-label="后退">▼</button>
     </div>
     <button id="btn-move-toggle" class="btn-move-toggle active" aria-label="切换移动/静止">移动</button>
     <button id="btn-fire" class="btn-fire" aria-label="开火">开火</button>

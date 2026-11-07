@@ -64,6 +64,104 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .nickname-field { max-width: 320px; margin: 0 auto 18px; text-align: left; }
 .btn-start-game { max-width: 320px; margin: 0 auto; padding: 16px; font-size: 18px; }
 
+/* 开始页右上角「设置」入口：绝对定位，不参与居中排版 */
+#view-landing { position: relative; }
+.landing-settings {
+  position: absolute;
+  top: max(20px, env(safe-area-inset-top));
+  right: max(20px, env(safe-area-inset-right));
+  z-index: 5;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 16px;
+  background: var(--panel); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 999px;
+  box-shadow: 3px 3px 0 var(--ink);
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 700;
+  cursor: pointer;
+}
+.landing-settings-icon { width: 17px; height: 17px; flex-shrink: 0; }
+.landing-settings:hover { border-color: var(--green); }
+.landing-settings:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+
+/* ---------- 设置页 ---------- */
+#view-settings {
+  position: relative;
+  /* 顶对齐：横屏矮屏时卡片比视口高也能从头滚动查看，不会被居中裁掉 */
+  align-items: flex-start;
+  padding: 72px 24px 48px;
+}
+.settings-back {
+  position: absolute;
+  top: max(20px, env(safe-area-inset-top));
+  left: max(20px, env(safe-area-inset-left));
+  padding: 8px 4px;
+  background: none; border: none;
+  color: var(--muted);
+  font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 700;
+  cursor: pointer;
+}
+.settings-back:hover { color: var(--green); }
+.settings-wrap { width: 100%; max-width: 560px; }
+.settings-head { text-align: center; margin-bottom: 22px; }
+.settings-head h1 { font-size: 34px; }
+.settings-page-panel { padding: 22px; }
+
+/* 设置分组的总标题：后续新增设置项时复用 .settings-group-head / .settings-group-title 即可 */
+.settings-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 0 0 12px;
+  padding-bottom: 9px;
+  border-bottom: 2px solid rgba(143, 189, 182, 0.25);
+}
+.settings-group-title {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 16px; font-weight: 700; color: var(--text);
+}
+.settings-group-title::before {
+  content: ''; flex-shrink: 0;
+  width: 4px; height: 15px; border-radius: 2px;
+  background: var(--yellow);
+}
+.settings-group-badge {
+  flex-shrink: 0; white-space: nowrap;
+  padding: 2px 8px;
+  border: 1px solid rgba(143, 189, 182, 0.55); border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px; font-weight: 700; line-height: 1.4;
+}
+.control-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.control-option {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 16px 10px 14px;
+  background: var(--bg); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 10px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.55);
+  font: inherit;
+  cursor: pointer;
+  transition: transform .08s ease;
+}
+.control-art { font-size: 26px; line-height: 1; color: var(--muted); }
+.control-name { font-size: 15px; font-weight: 700; }
+.control-desc { font-size: 11px; font-weight: 600; color: var(--muted); text-align: center; line-height: 1.3; }
+.control-option:hover { border-color: var(--green); }
+.control-option:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+.control-option.active { background: var(--yellow); color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+.control-option.active .control-art,
+.control-option.active .control-desc { color: var(--ink); opacity: .7; }
+.control-desc-main {
+  margin: 12px 0 0; min-height: 36px;
+  color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.5;
+}
+
+@media (max-width: 560px) {
+  .settings-page-panel { padding: 16px; }
+  .settings-head h1 { font-size: 28px; }
+  .landing-settings { top: max(14px, env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right)); padding: 8px 14px; }
+  .settings-back { top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left)); }
+}
+
 .card-row { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
 
 .panel {
@@ -385,6 +483,29 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .map-option:disabled { cursor: not-allowed; }
 .map-option:disabled:not(.active) { opacity: .45; }
 .map-option:disabled.active { opacity: .85; }
+
+/* 地图类型：两列按钮，名称 + 一行布局摘要；5 个类型时最后一项“随机”占满整行。 */
+.map-type-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.map-type-option {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  width: 100%; padding: 9px 10px;
+  background: var(--bg); color: var(--text);
+  border: 2px solid var(--ink); border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.55);
+  font: inherit; text-align: left;
+  cursor: pointer;
+  transition: transform .08s ease;
+}
+.map-type-option:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.map-type-option-name { font-size: 14px; font-weight: 700; }
+.map-type-option-desc { font-size: 11px; color: var(--muted); font-weight: 600; line-height: 1.3; }
+.map-type-option.active { background: var(--yellow); color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+.map-type-option.active .map-type-option-desc { color: var(--ink); opacity: .65; }
+.map-type-option:not(:disabled):hover { border-color: var(--green); }
+.map-type-option:not(:disabled):active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+.map-type-option:disabled { cursor: not-allowed; }
+.map-type-option:disabled:not(.active) { opacity: .45; }
+.map-type-option:disabled.active { opacity: .85; }
 
 /* 游戏模式：两个竖排选项，名称 + 一行规则摘要；选中黄色高亮，非房主禁用只读。 */
 .mode-picker { display: flex; flex-direction: column; gap: 8px; }
@@ -712,6 +833,52 @@ body.is-touch .game-wrap { gap: 8px; }
 }
 .joystick-zone.active .joystick-stick { transition: none; }
 
+/* ---------- 十字键：设置里选「十字键」后替代摇杆 ---------- */
+.dpad {
+  position: absolute;
+  left: var(--control-edge);
+  bottom: var(--control-bottom);
+  display: none; /* 默认隐藏，body.control-dpad 时显示 */
+  grid-template-columns: repeat(3, 54px);
+  grid-template-rows: repeat(3, 54px);
+  gap: 3px;
+  pointer-events: none; /* 容器不拦截，只有四个按键可交互 */
+}
+body.is-touch.control-dpad .dpad { display: grid; }
+body.is-touch.control-dpad .joystick-zone { display: none; }
+/* 十字键的上下就是前进/后退，不需要再切换「移动/静止」 */
+body.is-touch.control-dpad .btn-move-toggle { display: none; }
+
+.dpad-key {
+  pointer-events: auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+  background: rgba(18, 56, 50, 0.55); /* 与摇杆底板同一半透明色，不挡地图 */
+  color: var(--muted);
+  border: 3px solid var(--ink); border-radius: 10px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.4);
+  font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 700;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+.dpad-key[data-dir="forward"] { grid-area: 1 / 2; }
+.dpad-key[data-dir="left"] { grid-area: 2 / 1; }
+.dpad-key[data-dir="right"] { grid-area: 2 / 3; }
+.dpad-key[data-dir="backward"] { grid-area: 3 / 2; }
+.dpad-key.active {
+  background: rgba(255, 214, 10, 0.85); /* 按下时黄色高亮，和摇杆小球呼应 */
+  color: var(--ink);
+  box-shadow: 1px 1px 0 rgba(6, 17, 15, 0.4);
+  transform: translate(2px, 2px);
+}
+.dpad-hub {
+  grid-area: 2 / 2;
+  border-radius: 50%;
+  background: rgba(18, 56, 50, 0.35);
+  border: 3px solid var(--ink);
+}
+
 .btn-fire {
   position: absolute;
   right: var(--control-edge);
@@ -770,6 +937,7 @@ body.is-touch .game-wrap { gap: 8px; }
   .touch-controls { --fire-size: 72px; --fire-gap: 12px; }
   .joystick-zone { width: 108px; height: 108px; }
   .joystick-stick { width: 46px; height: 46px; margin: -23px 0 0 -23px; }
+  .dpad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
   .btn-fire { font-size: 12px; }
   .btn-move-toggle {
     width: 56px;
