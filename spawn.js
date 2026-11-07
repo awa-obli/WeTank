@@ -32,4 +32,35 @@ function pickSpawnCells({ cols, rows, cell, count, rand = Math.random }) {
   return spots.slice(0, need);
 }
 
-module.exports = { pickSpawnCells };
+/**
+ * 大乱斗复活点：从全图格心里随机挑一个，优先避开与存活坦克贴脸的位置。
+ *
+ * 和开局出生一样只用格心，保证不会刷进墙体；区别在于复活是单人、随时发生的，
+ * 所以额外做一层"离所有存活坦克至少 minDist"的过滤，避免直接刷在别人车头上。
+ * 如果过滤后没有剩余格子（极端拥挤），就退回全图格心随机，保证一定能复活。
+ */
+function pickRespawnCell({ cols, rows, cell, avoid = [], minDist = 0, rand = Math.random }) {
+  const all = [];
+  const safe = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const spot = { r, c, x: c * cell + cell / 2, y: r * cell + cell / 2 };
+      all.push(spot);
+      let clear = true;
+      for (const t of avoid) {
+        const dx = spot.x - t.x;
+        const dy = spot.y - t.y;
+        if (dx * dx + dy * dy < minDist * minDist) {
+          clear = false;
+          break;
+        }
+      }
+      if (clear) safe.push(spot);
+    }
+  }
+  const pool = safe.length ? safe : all;
+  if (pool.length === 0) return null;
+  return pool[Math.min(pool.length - 1, Math.floor(rand() * pool.length))];
+}
+
+module.exports = { pickSpawnCells, pickRespawnCell };

@@ -43,13 +43,27 @@
   const hpInputEl = document.getElementById('hp-input');
   const btnHpMinus = document.getElementById('btn-hp-minus');
   const btnHpPlus = document.getElementById('btn-hp-plus');
+  const modePickerEl = document.getElementById('mode-picker');
+  const modeDescEl = document.getElementById('mode-desc');
+  const killTargetGroup = document.getElementById('kill-target-group');
+  const killTargetInputEl = document.getElementById('kills-input');
+  const btnKillsMinus = document.getElementById('btn-kills-minus');
+  const btnKillsPlus = document.getElementById('btn-kills-plus');
+  const winScoreGroup = document.getElementById('win-score-group');
+  const winScoreInputEl = document.getElementById('win-score-input');
+  const btnWinMinus = document.getElementById('btn-win-minus');
+  const btnWinPlus = document.getElementById('btn-win-plus');
   const btnStart = document.getElementById('btn-start');
   const btnLeaveLobby = document.getElementById('btn-leave-lobby');
 
   const hudScores = document.getElementById('hud-scores');
+  const matchIntroEl = document.getElementById('match-intro');
+  const matchIntroModeEl = document.getElementById('match-intro-mode');
+  const matchIntroGoalEl = document.getElementById('match-intro-goal');
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
   const spectatorBanner = document.getElementById('spectator-banner');
+  const respawnBanner = document.getElementById('respawn-banner');
   const overlayRound = document.getElementById('overlay-round');
   const overlayTitle = document.getElementById('overlay-title');
   const overlaySub = document.getElementById('overlay-sub');
@@ -73,11 +87,24 @@
   let toastTimer = null;
   let joinPendingCode = null;
   let joinPendingTimer = null;
+  // 开局公告：本场是否还欠一次「模式 + 目标」的展示。
+  // 在 joined 时置位、game_start 时消费，保证每场只在第一次进入对局时显示一次。
+  let matchIntroPending = false;
+  let matchIntroTimer = null;
+  let matchIntroHideTimer = null;
   const NICKNAME_KEY = 'tank.nickname';
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
-  let maxHp = 3; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
+  let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
+  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ classic=经典模式
+  let killTarget = 10; // 大乱斗胜利所需击杀数，以服务端广播为准
+  let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
+  let respawnDelay = 10; // 大乱斗复活等待秒数，以服务端广播为准（仅用于文案）
   const MIN_HP = 1;
-  const MAX_HP = 20;
+  const MAX_HP = 10;
+  const MIN_KILLS = 5;
+  const MAX_KILLS = 30;
+  const MIN_WIN_SCORE = 1;
+  const MAX_WIN_SCORE = 10;
   let maze = null;
   let worldW = 960, worldH = 640;
   let tanks = [];
@@ -97,6 +124,15 @@
     { key: 'medium', name: '中', cols: 12, rows: 8 },
     { key: 'large', name: '大', cols: 15, rows: 10 },
   ];
+  // 与服务端 MODES 一一对应。大乱斗是默认模式，经典模式保留原有的淘汰制玩法。
+  const MODE_OPTIONS = [
+    { key: 'brawl', name: '大乱斗', tagline: '10 秒复活 · 击杀定胜负' },
+    { key: 'classic', name: '经典模式', tagline: '一条命 · 回合定胜负' },
+  ];
+  function modeName(key) {
+    const found = MODE_OPTIONS.find((m) => m.key === key);
+    return found ? found.name : '大乱斗';
+  }
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
   const SPAWN_PROTECT_TIME = 3; // 与服务端 SPAWN_PROTECT_TIME 一致，用于把剩余秒数换算成进度弧比例
@@ -321,8 +357,11 @@
         players = msg.players || [];
         spectators = msg.spectators || [];
         spectating = !!msg.spectating;
+        // 中途加入的观战者不播开局公告；只有以玩家身份进入下一场时才欠一次展示。
+        matchIntroPending = !spectating;
         mapSize = msg.mapSize || 'medium';
-        maxHp = msg.maxHp || 3;
+        maxHp = msg.maxHp || 5;
+        syncModeSettings(msg);
         lobbyCodeEl.textContent = roomCode;
         lobbyNameEl.textContent = roomName || '未命名房间';
         roomsErrorEl.textContent = '';
@@ -363,6 +402,7 @@
         }
         mapSize = msg.mapSize || mapSize;
         maxHp = msg.maxHp || maxHp;
+        syncModeSettings(msg);
         lobbyNameEl.textContent = roomName || '未命名房间';
         renderLobby();
         // 游戏中玩家进出不一定伴随 state 变化，这里立即按最新名单重建顶部标签。
@@ -378,6 +418,7 @@
         worldW = msg.worldW;
         worldH = msg.worldH;
         maxHp = msg.maxHp || maxHp;
+        syncModeSettings(msg);
         spawnAnimTime = msg.spawnMaterialize || spawnAnimTime; // 重生动画总时长，与服务端保持一致
         // 画布按世界尺寸调整（CSS 负责等比缩放到容器），这样不同档位的地图
         // 都能用同一套世界坐标绘制，不需要额外换算缩放比。
@@ -387,6 +428,9 @@
         spectators = msg.spectators || [];
         // 观战快照会显式带 spectating；下一回合的普通 game_start 则通过"自己是否在 players 里"判断。
         spectating = !!msg.spectating || !players.some((p) => p.id === myId);
+        // 消费本场的公告机会：只有以玩家身份进入对局才展示，观战快照不展示。
+        const showIntro = matchIntroPending && !spectating;
+        matchIntroPending = false;
         explosions = [];
         trails = [];
         spawnBlockFx = [];
@@ -403,11 +447,15 @@
         myAmmoMax = AMMO_MAX;
         myAmmoReload = 0;
         overlayRound.classList.add('hidden');
+        respawnBanner.classList.add('hidden');
         resetMoveToggleForRespawn();
         renderHud();
         showView('game');
         updateSpectatorUi();
         if (spectating && isTouchDevice) touchControls.classList.add('hidden');
+        // 注意：必须等 showView('game') 之后再播，否则公告条在隐藏的视图里就把过渡走完了。
+        if (showIntro) showMatchIntro();
+        else hideMatchIntro();
         break;
 
       case 'ammo':
@@ -422,6 +470,7 @@
         const prevSpecIds = spectators.map((s) => s.id).join('|');
         spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
         const activeChanged = syncPlayersFromTanks(msg.tanks);
+        const scoreChanged = syncScoresFromTanks(msg.tanks);
         const specChanged = prevSpecIds !== spectators.map((s) => s.id).join('|');
         if (myId) {
           if (players.some((p) => p.id === myId)) spectating = false;
@@ -434,10 +483,11 @@
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
-        if (activeChanged || specChanged) renderHud(); // 名单有进出时立即重建顶部标签
+        if (activeChanged || specChanged || scoreChanged) renderHud(); // 名单有进出或击杀数变化时立即重建顶部标签
         syncSelfState(); // 自己阵亡/观战时收起触屏控件并清空输入
         applyJoystickSteering(); // 用刚收到的最新朝向重新计算该转左还是转右
         renderHudFromTanks();
+        updateRespawnBanner();
         updateSpectatorUi();
         draw();
         break;
@@ -487,6 +537,7 @@
         players = msg.scores || players;
         spectators = Array.isArray(msg.spectators) ? msg.spectators : [];
         if (msg.hostId) hostId = msg.hostId;
+        syncModeSettings(msg);
         // 整场比赛结束后服务端会把观战者转正；这里同步切换成正式玩家。
         if (myId) {
           if (players.some((p) => p.id === myId)) spectating = false;
@@ -495,8 +546,18 @@
         updateSpectatorUi();
         renderHud();
         renderHudFromTanks();
+        respawnBanner.classList.add('hidden');
+        // 整场结束：收掉可能还在播的开局公告，并给下一场重新记一次展示机会。
+        matchIntroPending = true;
+        hideMatchIntro();
         if (msg.reason === 'not_enough_players') {
           overlayTitle.textContent = '对手已离开';
+          overlaySub.textContent = '即将返回房间…';
+        } else if (mode === 'brawl') {
+          const champion = players.find((p) => p.id === msg.winnerId);
+          overlayTitle.textContent = champion
+            ? `🏆 ${champion.name} 以 ${champion.score} 杀赢得整场比赛！`
+            : `🏆 ${nameOf(msg.winnerId)} 赢得整场比赛！`;
           overlaySub.textContent = '即将返回房间…';
         } else {
           overlayTitle.textContent = `🏆 ${nameOf(msg.winnerId)} 赢得整场比赛！`;
@@ -517,6 +578,14 @@
     return p ? p.name : '玩家';
   }
 
+  // 房间级模式设置统一从服务端消息同步，避免 joined / room_update / game_start 各写一套。
+  function syncModeSettings(msg) {
+    mode = msg.mode === 'classic' ? 'classic' : 'brawl';
+    if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
+    if (Number.isInteger(msg.winScore)) winScore = msg.winScore;
+    if (Number.isFinite(msg.respawnDelay)) respawnDelay = msg.respawnDelay;
+  }
+
   // 对比本帧与上一帧的存活状态，一旦发现"从活着变成死亡"就在坦克当前位置生成一次爆炸特效；
   // 同时对比护盾状态，一旦发现"护盾刚被打破"（人还活着）就生成一次小一号的蓝色火花特效
   function detectDeaths(newTanks) {
@@ -532,7 +601,7 @@
   }
 
   // ---------- 房间列表渲染 ----------
-  // 列表只展示选房间需要的信息：房间名、房间码、人数、状态、房主。
+  // 列表只展示选房间需要的信息：房间名、房间码、人数、状态、房主，以及开局后的游戏模式。
   // 地图/血量等房间内设置不在这里展示，也不通过 room_list 同步。
   function roomStatus(room) {
     if (room.playerCount >= room.maxPlayers) return { label: '已满', cls: 'full' };
@@ -565,7 +634,7 @@
     const hasRooms = roomList.length > 0;
     roomsEmptyEl.classList.toggle('hidden', hasRooms);
     roomsCountEl.textContent = hasRooms
-      ? `共 ${roomList.length} 个房间 · 点击加入或观战`
+      ? `共 ${roomList.length} 个房间`
       : '暂无房间';
 
     roomList.forEach((room) => {
@@ -576,11 +645,8 @@
       card.dataset.code = room.code;
       const status = roomStatus(room);
       const joinable = room.playerCount < room.maxPlayers;
-      const observing = room.state !== 'lobby';
       card.classList.toggle('room-card-joinable', joinable);
-      card.title = !joinable
-        ? '房间已满'
-        : (observing ? `点击进入观战「${room.name || '未命名房间'}」` : `点击加入「${room.name || '未命名房间'}」`);
+      card.title = !joinable ? '房间已满' : `点击加入「${room.name || '未命名房间'}」`;
       card.addEventListener('click', () => joinRoomFromList(room));
 
       const main = document.createElement('span');
@@ -618,6 +684,14 @@
         meta.appendChild(host);
       }
 
+      // 模式徽章：列表只突出"这个房间打什么模式"，具体目标数值进房后再看。
+      if (room.state !== 'lobby') {
+        const roomMode = document.createElement('span');
+        roomMode.className = 'room-mode';
+        roomMode.textContent = modeName(room.mode);
+        meta.appendChild(roomMode);
+      }
+
       main.appendChild(top);
       main.appendChild(meta);
       card.appendChild(main);
@@ -625,7 +699,7 @@
       if (joinable) {
         const enter = document.createElement('span');
         enter.className = 'room-enter';
-        enter.textContent = observing ? '观战 →' : '进入 →';
+        enter.textContent = '加入 →';
         card.appendChild(enter);
       }
 
@@ -661,7 +735,10 @@
     lobbyCodeEl.textContent = '----';
     lobbyPlayersEl.replaceChildren();
     hudScores.replaceChildren();
+    matchIntroPending = false;
+    hideMatchIntro();
     spectatorBanner.classList.add('hidden');
+    respawnBanner.classList.add('hidden');
     overlayRound.classList.add('hidden');
     renderRooms();
   }
@@ -701,8 +778,11 @@
       btnStart.textContent = '等待房主开始…';
     }
 
+    renderModePicker();
     renderMapPicker();
     renderHpSetting();
+    renderKillTargetSetting();
+    renderWinScoreSetting();
   }
 
   // 大厅右侧的地图大小选择：房主可点，其他玩家只能看到当前档位（按钮禁用，保持只读）。
@@ -738,8 +818,101 @@
     });
   }
 
+  // ---------- 游戏模式 ----------
+  // 大厅右侧的模式选择：大乱斗 / 经典模式。和地图/血量一样只做只读渲染，
+  // 点击后等服务端 room_update 回来再改高亮，保证所有人看到同一份权威状态。
+  function renderModePicker() {
+    const amHost = myId === hostId;
+    modePickerEl.innerHTML = '';
+    MODE_OPTIONS.forEach((opt) => {
+      const isActive = opt.key === mode;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mode-option' + (isActive ? ' active' : '');
+      btn.dataset.mode = opt.key;
+      btn.disabled = !amHost;
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+      const name = document.createElement('span');
+      name.className = 'mode-option-name';
+      name.textContent = opt.name;
+
+      const tagline = document.createElement('span');
+      tagline.className = 'mode-option-tagline';
+      tagline.textContent = opt.tagline;
+
+      btn.appendChild(name);
+      btn.appendChild(tagline);
+      btn.addEventListener('click', () => {
+        if (myId !== hostId || mode === opt.key) return;
+        send({ type: 'set_mode', mode: opt.key });
+      });
+      modePickerEl.appendChild(btn);
+    });
+
+    modeDescEl.textContent = mode === 'brawl'
+      ? `阵亡后 ${respawnDelay} 秒复活，先达到 ${killTarget} 次击杀者获胜。`
+      : `阵亡后本回合出局，先赢 ${winScore} 回合者获胜。`;
+    killTargetGroup.classList.toggle('hidden', mode !== 'brawl');
+    winScoreGroup.classList.toggle('hidden', mode !== 'classic');
+  }
+
+  // ---------- 大乱斗击杀目标 ----------
+  function clampKillTarget(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return killTarget;
+    return clampNum(n, MIN_KILLS, MAX_KILLS);
+  }
+
+  function renderKillTargetSetting() {
+    const amHost = myId === hostId;
+    if (document.activeElement !== killTargetInputEl) killTargetInputEl.value = String(killTarget);
+    const disabled = !amHost || mode !== 'brawl';
+    killTargetInputEl.disabled = disabled;
+    btnKillsMinus.disabled = disabled;
+    btnKillsPlus.disabled = disabled;
+  }
+
+  function requestKillTarget(value) {
+    if (mode !== 'brawl') return;
+    const next = clampKillTarget(value);
+    killTargetInputEl.value = String(next);
+    if (next !== killTarget) send({ type: 'set_kill_target', kills: next });
+  }
+
+  killTargetInputEl.addEventListener('change', () => requestKillTarget(killTargetInputEl.value));
+  btnKillsMinus.addEventListener('click', () => requestKillTarget(clampKillTarget(killTargetInputEl.value) - 1));
+  btnKillsPlus.addEventListener('click', () => requestKillTarget(clampKillTarget(killTargetInputEl.value) + 1));
+
+  // ---------- 经典模式胜利分数 ----------
+  function clampWinScore(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return winScore;
+    return clampNum(n, MIN_WIN_SCORE, MAX_WIN_SCORE);
+  }
+
+  function renderWinScoreSetting() {
+    const amHost = myId === hostId;
+    if (document.activeElement !== winScoreInputEl) winScoreInputEl.value = String(winScore);
+    const disabled = !amHost || mode !== 'classic';
+    winScoreInputEl.disabled = disabled;
+    btnWinMinus.disabled = disabled;
+    btnWinPlus.disabled = disabled;
+  }
+
+  function requestWinScore(value) {
+    if (mode !== 'classic') return;
+    const next = clampWinScore(value);
+    winScoreInputEl.value = String(next);
+    if (next !== winScore) send({ type: 'set_win_score', score: next });
+  }
+
+  winScoreInputEl.addEventListener('change', () => requestWinScore(winScoreInputEl.value));
+  btnWinMinus.addEventListener('click', () => requestWinScore(clampWinScore(winScoreInputEl.value) - 1));
+  btnWinPlus.addEventListener('click', () => requestWinScore(clampWinScore(winScoreInputEl.value) + 1));
+
   // ---------- 初始血量设置 ----------
-  // 大厅右侧的初始血量：房主可直接输入 1–20 的整数，也可以用两侧的 −/+ 微调；
+  // 大厅右侧的初始血量：房主可直接输入 1–10 的整数，也可以用两侧的 −/+ 微调；
   // 其他玩家只能看到当前数值（控件禁用）。和地图大小一样不做本地乐观更新：
   // 改完等服务端 room_update 回来，所有人看到的血量上限始终来自同一份权威状态。
   function clampHpValue(v) {
@@ -793,11 +966,85 @@
       const old = oldById.get(t.id);
       return {
         id: t.id, name: t.name, color: t.color,
-        score: old ? old.score : 0,
+        score: typeof t.score === 'number' ? t.score : (old ? old.score : 0),
         connected: true,
       };
     });
     return true;
+  }
+
+  // 大乱斗没有 round_end 可以携带分数，击杀数只能从每帧 state 同步；
+  // 只有真的变化时才要求重建 HUD，避免 30Hz 全量重绘 DOM。
+  function syncScoresFromTanks(currentTanks) {
+    if (!Array.isArray(currentTanks)) return false;
+    let changed = false;
+    for (const t of currentTanks) {
+      if (typeof t.score !== 'number') continue;
+      const p = players.find((x) => x.id === t.id);
+      if (p && p.score !== t.score) {
+        p.score = t.score;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  // ---------- 开局公告 ----------
+  // 模式与胜负目标只在进入对局时短暂出现一次，不在对局中常驻，避免遮挡地图；
+  // 中途加入的观战者不显示（matchIntroPending 在 joined 里就按身份决定是否置位）。
+  const MATCH_INTRO_VISIBLE_MS = 2000; // 淡入 0.2s + 停留 1.8s
+  const MATCH_INTRO_FADE_OUT_MS = 350; // 与 .match-intro.leaving 的 transition-duration 对齐
+
+  function clearMatchIntroTimers() {
+    clearTimeout(matchIntroTimer);
+    clearTimeout(matchIntroHideTimer);
+    matchIntroTimer = null;
+    matchIntroHideTimer = null;
+  }
+
+  function showMatchIntro() {
+    clearMatchIntroTimers();
+    matchIntroEl.classList.remove('hidden', 'leaving');
+    // 先让 live region 可见再写文案，读屏才会把这次公告读出来
+    matchIntroModeEl.textContent = mode === 'brawl' ? '大乱斗' : '经典模式';
+    matchIntroGoalEl.textContent = mode === 'brawl'
+      ? `先达到 ${killTarget} 次击杀`
+      : `先赢 ${winScore} 回合`;
+    // 强制回流：从 display:none 切出来的同一帧直接加 .show 不会触发过渡
+    void matchIntroEl.offsetWidth;
+    matchIntroEl.classList.add('show');
+    matchIntroEl.parentElement.classList.add('showing-intro');
+    matchIntroTimer = setTimeout(() => {
+      matchIntroEl.classList.remove('show');
+      matchIntroEl.classList.add('leaving');
+      matchIntroHideTimer = setTimeout(() => {
+        matchIntroEl.classList.add('hidden');
+        matchIntroEl.classList.remove('leaving');
+        // 等公告条完全淡出后再让观战横幅回位，避免淡出过程中两者短暂重叠
+        matchIntroEl.parentElement.classList.remove('showing-intro');
+        matchIntroHideTimer = null;
+      }, MATCH_INTRO_FADE_OUT_MS);
+      matchIntroTimer = null;
+    }, MATCH_INTRO_VISIBLE_MS);
+  }
+
+  function hideMatchIntro() {
+    clearMatchIntroTimers();
+    matchIntroEl.classList.remove('show', 'leaving');
+    matchIntroEl.classList.add('hidden');
+    matchIntroEl.parentElement.classList.remove('showing-intro');
+  }
+
+  // 自己阵亡时在画布上显示复活倒计时；复活、观战、经典模式都自动隐藏。
+  function updateRespawnBanner() {
+    const self = tanks.find((t) => t.id === myId);
+    const showing = mode === 'brawl' && !spectating && self && !self.alive && self.respawn > 0;
+    if (!showing) {
+      respawnBanner.classList.add('hidden');
+      return;
+    }
+    respawnBanner.textContent = `${Math.ceil(self.respawn)}s 后复活`;
+    respawnBanner.classList.remove('hidden');
   }
 
   function updateSpectatorUi() {
@@ -903,7 +1150,7 @@
     return '#E63946';
   }
 
-  // 分段血条：格数 = 房间设置的初始血量（1–20），掉一格就是少 1 点。
+  // 分段血条：格数 = 房间设置的初始血量（1–10），掉一格就是少 1 点。
   // 格数多时自动收窄格宽，整条宽度封顶 56px，不会比坦克大太多。
   function drawHpBar(t, barY) {
     const total = Math.max(1, maxHp);
@@ -1103,7 +1350,7 @@
     if (self.invisible) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA; // 自己隐身时角标跟着半透明
 
     // 空弹只保留静态红边提示，不做闪烁/脉冲动画
-    ctx.fillStyle = 'rgba(6, 17, 15, 0.88)';
+    ctx.fillStyle = 'rgba(6, 17, 15, 0.80)';
     ctx.beginPath();
     ctx.roundRect(bx, by, badgeW, AMMO_BADGE_H, 5);
     ctx.fill();
@@ -1439,6 +1686,11 @@
   // 自己阵亡、或者重生动画还没播完（坦克还没出现）时，收起摇杆/开火/移动切换：
   // 这两种状态下按了也没用，露出来只会误触。阵亡时同时清空本地输入，
   // 免得复活瞬间还带着死前按住的方向。
+  //
+  // 大乱斗的复活不经过 game_start，所以这里记下自己上一帧是否可操作：
+  // 从"阵亡 / 凝聚动画"恢复为可操作时补一次移动切换的复位，
+  // 保证复活后按钮总是回到默认的「移动」态，而不是沿用死前的选择。
+  let selfWasControllable = true;
   function syncSelfState() {
     if (spectating) {
       // 观战者没有自己的坦克：收起控件、清空可能残留的按键。
@@ -1458,6 +1710,9 @@
     const alive = !!self && self.alive;
     // 实体真正出现（存活且重生动画播完）之前都算“还没上场”，控件保持隐藏
     const canAct = alive && !(self.spawnAnim > 0);
+    // 重新上场（大乱斗复活 / 回合开局凝聚动画结束）时把移动切换复位为默认移动态
+    if (canAct && !selfWasControllable) resetMoveToggleForRespawn();
+    selfWasControllable = canAct;
     if (isTouchDevice) touchControls.classList.toggle('hidden', !canAct);
     if (!alive) {
       joystickVector = null;

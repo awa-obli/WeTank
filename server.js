@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 const physics = require('./physics');
-const { pickSpawnCells } = require('./spawn');
+const { pickSpawnCells, pickRespawnCell } = require('./spawn');
 
 // ---------- 常量配置 ----------
 const PORT = process.env.PORT || 8080;
@@ -58,14 +58,34 @@ const ROUND_RESTART_DELAY = 3000; // ms
 const BULLET_MAX_STEP = 3; // 每个子步最大位移(px)，需明显小于 WALL_THICK
 const BULLET_SUBSTEPS = Math.max(1, Math.ceil((BULLET_SPEED * DT) / BULLET_MAX_STEP));
 const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
-const WIN_SCORE = 5;
+
+// ---------- 游戏模式 ----------
+// brawl（大乱斗）是默认模式：单局连续死斗，阵亡 10 秒后在随机位置复活，
+// 先达到房间设置的击杀目标者获胜；classic（经典模式）保留原玩法：
+// 淘汰制回合计分，先达到房间设置的胜利分数者获胜。
+const MODES = {
+  brawl: { key: 'brawl', name: '大乱斗' },
+  classic: { key: 'classic', name: '经典模式' },
+};
+const DEFAULT_MODE = 'brawl';
+
+// 大乱斗：复活等待时长（秒，固定）与击杀目标（房间级设置，房主可改）
+const BRAWL_RESPAWN_DELAY = 10;
+const DEFAULT_KILL_TARGET = 10;
+const MIN_KILL_TARGET = 5;
+const MAX_KILL_TARGET = 30;
+
+// 经典模式：胜利所需回合数（房间级设置，房主可改，默认即原来的 5 回合）
+const DEFAULT_WIN_SCORE = 5;
+const MIN_WIN_SCORE = 1;
+const MAX_WIN_SCORE = 10;
 
 // ---------- 血量机制 ----------
 // 房间级设置：每回合开局把所有人血量补满，每发子弹固定造成 1 点伤害。
-// 房主在大厅里可以自由设置 1–20 点；1 点即等同于旧版的一击必杀。
-const DEFAULT_MAX_HP = 3;
+// 房主在大厅里可以自由设置 1–10 点，默认 5 点；1 点即等同于旧版的一击必杀。
+const DEFAULT_MAX_HP = 5;
 const MIN_MAX_HP = 1;
-const MAX_MAX_HP = 20;
+const MAX_MAX_HP = 10;
 const BULLET_DAMAGE = 1;
 // 维修包道具：拾取后回 1 点，不超过房间的血量上限；满血时仍然会拾取，但回血为 0、道具消失。
 const REPAIR_HEAL = 1;
@@ -127,6 +147,8 @@ function makePlayer(id, name, ws, room) {
     shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
     spawnProtectRemaining: 0, spawnAnimRemaining: 0,
     ammo: AMMO_MAX, ammoReloadAcc: 0,
+    // 大乱斗专用：阵亡后的复活倒计时（秒），0 表示活着或不在等待复活。
+    respawnRemaining: 0,
   };
 }
 
@@ -273,6 +295,12 @@ class Room {
     // 地图大小与初始血量都是房间级设置：房主在大厅里改，每回合开始时按它生成迷宫/补满血量。
     this.mapSize = DEFAULT_MAP_SIZE;
     this.maxHp = DEFAULT_MAX_HP;
+    // 游戏模式与各模式的胜利目标同样是房间级设置，只在大厅可改：
+    //   brawl   → killTarget（击杀数）
+    //   classic → winScore（回合胜场数）
+    this.mode = DEFAULT_MODE;
+    this.killTarget = DEFAULT_KILL_TARGET;
+    this.winScore = DEFAULT_WIN_SCORE;
     const preset = MAP_PRESETS[this.mapSize];
     this.cols = preset.cols;
     this.rows = preset.rows;
@@ -302,6 +330,9 @@ class Room {
       spectators: this.spectatorList(),
       mapSize: this.mapSize,
       maxHp: this.maxHp,
+      mode: this.mode,
+      killTarget: this.killTarget,
+      winScore: this.winScore,
     });
   }
 
@@ -347,6 +378,10 @@ class Room {
       worldH: this.worldH,
       mapSize: this.mapSize,
       maxHp: this.maxHp,
+      mode: this.mode,
+      killTarget: this.killTarget,
+      winScore: this.winScore,
+      respawnDelay: BRAWL_RESPAWN_DELAY,
       // 重生动画总时长（秒）：客户端用它把每帧的剩余时间换算成缩放/透明度进度。
       spawnMaterialize: SPAWN_MATERIALIZE_TIME,
       ...extra,
@@ -366,6 +401,9 @@ class Room {
         hp: p.hp,
         color: p.color,
         name: p.name,
+        // 大乱斗里 score 就是击杀数；经典模式里是回合胜场数。
+        // 大乱斗没有 round_end 可以带分数，所以必须在每帧 state 里实时同步。
+        score: p.score,
         shield: p.shield,
         speedBoost: p.speedBoostRemaining > 0,
         tripleReady: p.tripleReady,
@@ -377,6 +415,9 @@ class Room {
         // 重生动画剩余秒数（保留 2 位小数）：>0 表示坦克还在凝聚、没有实体，
         // 客户端据此画"放大 + 半透明"的出生动画；0 表示已经正常出现。
         spawnAnim: Math.round(p.spawnAnimRemaining * 100) / 100,
+        // 大乱斗阵亡后的复活倒计时（秒，保留 1 位小数），0 表示活着或不在等待复活；
+        // 经典模式没有复活机制，这里恒为 0。
+        respawn: Math.round(p.respawnRemaining * 10) / 10,
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
       items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
@@ -431,6 +472,8 @@ class Room {
       // 保护倒计时先冻结，等 0.75 秒重生动画播完、坦克真正出现后才开始走。
       p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
       p.spawnAnimRemaining = SPAWN_MATERIALIZE_TIME;
+      // 开局重新站上出生点，清掉上一场可能残留的复活倒计时。
+      p.respawnRemaining = 0;
     });
 
     this.broadcast(this.gameStartMessage());
@@ -442,6 +485,9 @@ class Room {
 
   tick() {
     if (this.state !== 'playing' && this.state !== 'round_pending') return;
+    // 大乱斗：先推进阵亡玩家的复活倒计时，到点的人在这一帧重新上场；
+    // 随后再统一计算存活名单，复活者会带着出生动画进入下面的移动/碰撞逻辑。
+    if (this.mode === 'brawl' && this.state === 'playing') this.updateRespawns();
     const alivePlayers = [...this.players.values()].filter((p) => p.alive);
 
     // --- 坦克移动 ---
@@ -691,6 +737,16 @@ class Room {
               if (p.hp <= 0) {
                 p.alive = false;
                 p.lastHitBy = b.owner;
+                if (this.mode === 'brawl') {
+                  // 大乱斗里阵亡不是退场：开始 10 秒复活倒计时，由 updateRespawns 放回场上。
+                  p.respawnRemaining = BRAWL_RESPAWN_DELAY;
+                  // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
+                  p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
+                  // 击杀统计：自己打自己（跳弹命中自己）不计分；
+                  // 已经阵亡的击杀者生前打出的子弹仍然算他的击杀。
+                  const killer = this.players.get(b.owner);
+                  if (killer && killer.id !== p.id) killer.score += 1;
+                }
               }
               damageHits.push({
                 playerId: p.id,
@@ -737,7 +793,22 @@ class Room {
     // --- 广播状态 ---
     this.broadcast(this.stateMessage());
 
-    // --- 回合结束判断 ---
+    // --- 大乱斗胜负判断 ---
+    // 以击杀数为胜利条件：任意玩家达到房间设置的击杀目标就结束整场。
+    // 放在 state 广播之后，保证客户端先看到最后一杀的画面和最新击杀数，再收到 match_end。
+    if (this.mode === 'brawl') {
+      let champion = null;
+      for (const p of this.players.values()) {
+        if (p.score >= this.killTarget && (!champion || p.score > champion.score)) champion = p;
+      }
+      if (champion) {
+        // 复用整场结束流程：停 tick、回大厅、观战者转正、广播 match_end。
+        this.advanceAfterRound(champion);
+        return;
+      }
+    }
+
+    // --- 经典模式回合结束判断 ---
     // 只剩 1 人（或恰好 0 人，双方同归于尽）存活时不立即结束回合，而是进入 5 秒观察期：
     // 一方面给死亡爆炸特效留出播放时间，另一方面场上可能还有飞行中的子弹，
     // 如果这 5 秒内"最后一人"也被打死了，就直接判定平局（不给任何人加分），
@@ -745,7 +816,7 @@ class Room {
     const total = this.players.size;
     const stillAlive = [...this.players.values()].filter((p) => p.alive);
 
-    if (this.state === 'playing' && total >= 2 && stillAlive.length <= 1) {
+    if (this.mode === 'classic' && this.state === 'playing' && total >= 2 && stillAlive.length <= 1) {
       this.state = 'round_pending';
       this.pendingWinnerId = stillAlive.length === 1 ? stillAlive[0].id : null;
       this.pendingTimeout = setTimeout(() => {
@@ -754,7 +825,7 @@ class Room {
         const winner = this.pendingWinnerId ? this.players.get(this.pendingWinnerId) : null;
         this.endRound(winner || null);
       }, 5000);
-    } else if (this.state === 'round_pending' && this.pendingWinnerId) {
+    } else if (this.mode === 'classic' && this.state === 'round_pending' && this.pendingWinnerId) {
       const w = this.players.get(this.pendingWinnerId);
       if (!w || !w.alive) {
         // 观察期内，原本"存活的最后一人"也阵亡了：把待定结果改成平局，
@@ -763,6 +834,54 @@ class Room {
         this.pendingWinnerId = null;
       }
     }
+  }
+
+  // ---------- 大乱斗复活 ----------
+  // 阵亡玩家的倒计时只在比赛进行中推进；每减去一个 DT 就检查是否到点。
+  // 浮点累减会有极小误差，用 1e-6 容差兜住，保证正好 10 秒（300 tick）复活。
+  updateRespawns() {
+    for (const p of this.players.values()) {
+      if (p.alive || p.respawnRemaining <= 0) continue;
+      p.respawnRemaining = Math.max(0, p.respawnRemaining - DT);
+      if (p.respawnRemaining < 1e-6) {
+        p.respawnRemaining = 0;
+        this.respawnPlayer(p);
+      }
+    }
+  }
+
+  // 复活 = 一次单人版的"开局重置"：随机格心、随机朝向、满血满弹、清空所有增益，
+  // 并重新给 0.75 秒凝聚动画 + 3 秒出生保护（保护在动画播完后才开始倒计时）。
+  respawnPlayer(p) {
+    const avoid = [...this.players.values()]
+      .filter((o) => o !== p && o.alive)
+      .map((o) => ({ x: o.x, y: o.y }));
+    const spot = pickRespawnCell({
+      cols: this.cols,
+      rows: this.rows,
+      cell: CELL,
+      avoid,
+      minDist: TANK_RADIUS * 2,
+    });
+    if (spot) {
+      p.x = spot.x;
+      p.y = spot.y;
+    }
+    p.angle = Math.random() * Math.PI * 2;
+    p.alive = true;
+    p.hp = this.maxHp;
+    p.cooldown = 0;
+    p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
+    p.shield = false;
+    p.speedBoostRemaining = 0;
+    p.tripleReady = false;
+    p.homingReady = false;
+    p.invisibleRemaining = 0;
+    p.ammo = AMMO_MAX;
+    p.ammoReloadAcc = 0;
+    p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
+    p.spawnAnimRemaining = SPAWN_MATERIALIZE_TIME;
+    p.respawnRemaining = 0;
   }
 
   moveTankAxis(p, dx, dy) {
@@ -817,7 +936,7 @@ class Room {
     if (winner) winner.score += 1;
 
     const scores = this.playerList();
-    const champion = scores.find((s) => s.score >= WIN_SCORE);
+    const champion = scores.find((s) => s.score >= this.winScore);
     // final 表示这局结束后整场比赛就结束了：冠军已产生，或人数已经不够再开一局。
     // 客户端拿它区分结算文案，避免决胜回合先显示"下一回合即将开始"、3 秒后又跳成"即将返回房间"。
     this.broadcast({
@@ -826,6 +945,8 @@ class Room {
       scores,
       spectators: this.spectatorList(),
       final: Boolean(champion) || this.players.size < 2,
+      mode: this.mode,
+      winScore: this.winScore,
     });
     broadcastRoomList(); // 回合结算期间不算"等待中"，列表状态同步更新
 
@@ -861,6 +982,9 @@ class Room {
       hostId: this.hostId,
       spectators: [],
       reason,
+      mode: this.mode,
+      killTarget: this.killTarget,
+      winScore: this.winScore,
     });
     this.broadcastRoom();
   }
@@ -877,6 +1001,9 @@ class Room {
         scores: this.playerList(),
         hostId: this.hostId,
         spectators: [],
+        mode: this.mode,
+        killTarget: this.killTarget,
+        winScore: this.winScore,
       });
       this.broadcastRoom();
     } else if (this.players.size >= 2) {
@@ -956,6 +1083,8 @@ function roomSummary(room) {
     maxPlayers: MAX_PLAYERS,
     state: room.state,
     hostName: host ? host.name : '',
+    // 模式是选房时会关心的公开信息（列表卡片上显示徽章），不属于地图/血量那种房间内部配置。
+    mode: room.mode,
   };
 }
 
@@ -1024,6 +1153,8 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: [],
         mapSize: room.mapSize, maxHp: room.maxHp,
+        mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+        respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       broadcastRoomList();
       return;
@@ -1058,6 +1189,8 @@ wss.on('connection', (ws) => {
           type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
           spectating: true, players: room.playerList(), spectators: room.spectatorList(),
           mapSize: room.mapSize, maxHp: room.maxHp,
+          mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+          respawnDelay: BRAWL_RESPAWN_DELAY,
         }));
         // 补发当前迷宫和状态，观战者不用等下一帧也能立即看到完整对局。
         ws.send(JSON.stringify(room.gameStartMessage({ spectating: true })));
@@ -1076,6 +1209,8 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: room.spectatorList(),
         mapSize: room.mapSize, maxHp: room.maxHp,
+        mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+        respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       room.broadcastRoom();
       broadcastRoomList();
@@ -1129,6 +1264,78 @@ wss.on('connection', (ws) => {
       }
       if (currentRoom.maxHp !== hp) {
         currentRoom.maxHp = hp;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_mode') {
+      // 模式和地图/血量一样是房主专属、只在大厅可改：开局后再换模式会让进行中的对局语义混乱。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改游戏模式' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改游戏模式' }));
+        return;
+      }
+      const mode = String(msg.mode || '');
+      if (!Object.prototype.hasOwnProperty.call(MODES, mode)) {
+        ws.send(JSON.stringify({ type: 'error', message: '无效的游戏模式' }));
+        return;
+      }
+      if (currentRoom.mode !== mode) {
+        currentRoom.mode = mode;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_kill_target') {
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改击杀目标' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改击杀目标' }));
+        return;
+      }
+      if (currentRoom.mode !== 'brawl') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有大乱斗模式可以设置击杀目标' }));
+        return;
+      }
+      const kills = parseInteger(msg.kills);
+      if (!Number.isInteger(kills) || kills < MIN_KILL_TARGET || kills > MAX_KILL_TARGET) {
+        ws.send(JSON.stringify({ type: 'error', message: `击杀目标必须是 ${MIN_KILL_TARGET}–${MAX_KILL_TARGET} 之间的整数` }));
+        return;
+      }
+      if (currentRoom.killTarget !== kills) {
+        currentRoom.killTarget = kills;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_win_score') {
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改胜利分数' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改胜利分数' }));
+        return;
+      }
+      if (currentRoom.mode !== 'classic') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有经典模式可以设置胜利分数' }));
+        return;
+      }
+      const score = parseInteger(msg.score);
+      if (!Number.isInteger(score) || score < MIN_WIN_SCORE || score > MAX_WIN_SCORE) {
+        ws.send(JSON.stringify({ type: 'error', message: `胜利分数必须是 ${MIN_WIN_SCORE}–${MAX_WIN_SCORE} 之间的整数` }));
+        return;
+      }
+      if (currentRoom.winScore !== score) {
+        currentRoom.winScore = score;
         currentRoom.broadcastRoom();
       }
       return;
@@ -1215,6 +1422,13 @@ wss.on('connection', (ws) => {
   }
 });
 
+// 解析房间设置里的整数：只接受 number / 非空数字字符串。
+// null/true/false 等如果直接走 Number() 会被悄悄转成 0/1，必须在类型层就拒绝。
+function parseInteger(raw) {
+  const validType = typeof raw === 'number' || typeof raw === 'string';
+  return validType && String(raw).trim() !== '' ? Number(raw) : NaN;
+}
+
 function sanitizeName(name, fallbackNumber) {
   const n = String(name || '').trim().slice(0, 12);
   return n.length ? n : `玩家 ${fallbackNumber}`;
@@ -1244,6 +1458,15 @@ module.exports = {
   SPAWN_PROTECT_TIME,
   SPAWN_MATERIALIZE_TIME,
   MAP_PRESETS,
+  MODES,
+  DEFAULT_MODE,
+  BRAWL_RESPAWN_DELAY,
+  DEFAULT_KILL_TARGET,
+  MIN_KILL_TARGET,
+  MAX_KILL_TARGET,
+  DEFAULT_WIN_SCORE,
+  MIN_WIN_SCORE,
+  MAX_WIN_SCORE,
   CELL,
   TANK_RADIUS,
   BULLET_RADIUS,

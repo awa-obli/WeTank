@@ -1,10 +1,10 @@
 'use strict';
 
 // 初始血量设置的端到端测试（需要先启动服务端，默认连 ws://127.0.0.1:8080）：
-//   1. 新房间默认 3 点，新加入的玩家同样能看到；
+//   1. 新房间默认 5 点，新加入的玩家同样能看到；
 //   2. 非房主修改被拒绝，且不产生 room_update 广播；
-//   3. 非法值（0、21、小数、布尔、null、非数字字符串）被拒绝；
-//   4. 房主改成 1 / 20 / 8 后所有玩家同步；
+//   3. 非法值（0、11、小数、布尔、null、非数字字符串）被拒绝；
+//   4. 房主改成 1 / 10 / 8 后所有玩家同步；
 //   5. 开局 game_start 带 maxHp，state 里每辆坦克都是满血；
 //   6. 对局进行中不允许修改初始血量。
 const WebSocket = require('ws');
@@ -74,10 +74,10 @@ async function joinRoom(name, code) {
 
 async function main() {
   const host = await createRoom('房主');
-  check(host.joined.maxHp === 3, `新房默认初始血量是 3（实际 ${host.joined.maxHp}）`);
+  check(host.joined.maxHp === 5, `新房默认初始血量是 5（实际 ${host.joined.maxHp}）`);
 
   const guest = await joinRoom('队员', host.joined.code);
-  check(guest.joined.maxHp === 3, '新加入的玩家收到当前初始血量');
+  check(guest.joined.maxHp === 5, '新加入的玩家收到当前初始血量');
   // 先消费掉"有人加入"触发的 room_update，避免干扰后面的权限断言
   await waitForMsg(host.client, (m) => m.type === 'room_update' && m.players.length === 2, 'room_update(2人)');
 
@@ -93,7 +93,7 @@ async function main() {
   // ---------- 非法值 ----------
   const invalids = [
     [0, '0'],
-    [21, '21'],
+    [11, '11'],
     [3.5, '小数 3.5'],
     [true, '布尔 true'],
     [null, 'null'],
@@ -103,11 +103,11 @@ async function main() {
   for (const [value, label] of invalids) {
     send(host.client, { type: 'set_hp', hp: value });
     const err = await waitForMsg(host.client, (m) => m.type === 'error', `error(非法值 ${label})`);
-    check(/1–20/.test(err.message), `非法血量（${label}）被拒绝：${err.message}`);
+    check(/1–10/.test(err.message), `非法血量（${label}）被拒绝：${err.message}`);
   }
 
   // ---------- 合法边界与同步 ----------
-  for (const value of [1, 20, 8]) {
+  for (const value of [1, 10, 8]) {
     send(host.client, { type: 'set_hp', hp: value });
     const updatedHost = await waitForMsg(host.client, (m) => m.type === 'room_update' && m.maxHp === value, `room_update(${value}, 房主)`);
     const updatedGuest = await waitForMsg(guest.client, (m) => m.type === 'room_update' && m.maxHp === value, `room_update(${value}, 队员)`);

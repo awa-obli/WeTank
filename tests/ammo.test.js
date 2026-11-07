@@ -58,6 +58,8 @@ function makePlayer(id, ws) {
 
 function makeRoom(playerCount) {
   const room = new Room('TEST');
+  // 弹药机制本身两模式通用，但这里沿用经典模式跑，避免阵亡后复活干扰用例。
+  room.mode = 'classic';
   room.state = 'playing';
   const sockets = [];
   for (let i = 0; i < playerCount; i++) {

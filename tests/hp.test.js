@@ -57,6 +57,8 @@ function makePlayer(id, ws) {
 
 function makeRoom(playerCount) {
   const room = new Room('TEST');
+  // 血量机制与回合内淘汰绑定，本文件按经典模式测试；大乱斗已是默认模式。
+  room.mode = 'classic';
   room.state = 'playing';
   const sockets = [];
   for (let i = 0; i < playerCount; i++) {
@@ -94,7 +96,7 @@ function damageMessages(socket) {
 test('默认血量与允许范围', () => {
   const room = new Room('TEST');
   assert.equal(room.maxHp, DEFAULT_MAX_HP);
-  assert.equal(DEFAULT_MAX_HP, 3);
+  assert.equal(DEFAULT_MAX_HP, 5);
   assert.ok(MIN_MAX_HP >= 1, `最小血量异常: ${MIN_MAX_HP}`);
   assert.ok(MAX_MAX_HP >= DEFAULT_MAX_HP, `最大血量异常: ${MAX_MAX_HP}`);
   assert.equal(BULLET_DAMAGE, 1);

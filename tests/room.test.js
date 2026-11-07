@@ -57,6 +57,8 @@ function makePlayer(id, ws) {
 
 function makeRoom(playerCount, keepSpawnAnim = false) {
   const room = new Room('TEST');
+  // 本文件测的是经典模式的回合计分/淘汰逻辑；大乱斗已改为默认模式，这里显式指定。
+  room.mode = 'classic';
   room.state = 'playing';
   const sockets = [];
   for (let i = 0; i < playerCount; i++) {
