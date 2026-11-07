@@ -80,7 +80,7 @@ async function main() {
   );
   const room = one.rooms.find((r) => r.code === joined.code);
   check(room.name === '周末欢乐局', `列表显示房间名（实际 ${room.name}）`);
-  check(room.playerCount === 1 && room.maxPlayers === 7, `列表显示人数（实际 ${room.playerCount}/${room.maxPlayers}）`);
+  check(room.playerCount === 1 && room.maxPlayers === 10, `列表显示人数（实际 ${room.playerCount}/${room.maxPlayers}）`);
   check(room.state === 'lobby', `列表显示等待状态（实际 ${room.state}）`);
   check(!Object.prototype.hasOwnProperty.call(room, 'mapSize') && !Object.prototype.hasOwnProperty.call(room, 'maxHp'),
     '列表不携带地图档位 / 初始血量');

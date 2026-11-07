@@ -1,7 +1,7 @@
 'use strict';
 
 // 房间逻辑的确定性单元测试（不监听网络端口，直接驱动 Room）：
-//   1. 7 人开局时出生格互不重复、都在格心、朝向在 [0, 2π)；
+//   1. 10 人开局时出生格互不重复、都在格心、朝向在 [0, 2π)；
 //   2. 出生保护期间子弹被吸收：不掉血、不消耗道具护盾，并广播 spawn_block；
 //   3. 保护到期后，同样的子弹能正常击杀目标；
 //   4. 开火会立即解除出生保护；
@@ -93,10 +93,10 @@ function shootAt(room, shooter, target) {
   });
 }
 
-test('7 人开局：出生格互不重复、都在格心、朝向随机', () => {
+test('10 人开局：出生格互不重复、都在格心、朝向随机', () => {
   // 跑多轮，覆盖不同的随机出生布局
   for (let round = 0; round < 30; round++) {
-    const { room } = makeRoom(7);
+    const { room } = makeRoom(10);
     try {
       const used = new Set();
       for (const p of room.players.values()) {
@@ -110,20 +110,20 @@ test('7 人开局：出生格互不重复、都在格心、朝向随机', () => 
         assert.ok(!used.has(key), `出生格重复: ${key}`);
         used.add(key);
       }
-      assert.equal(used.size, 7);
+      assert.equal(used.size, 10);
     } finally {
       room.stopTicking();
     }
   }
 });
 
-test('7 人开局：state 广播里带 spawnProtect 且坦克数量正确', () => {
-  const { room, sockets } = makeRoom(7);
+test('10 人开局：state 广播里带 spawnProtect 且坦克数量正确', () => {
+  const { room, sockets } = makeRoom(10);
   try {
     room.tick(); // startRound 只广播 game_start，state 要等第一次 tick 才发
     const state = sockets[0].messages.find((m) => m.type === 'state');
     assert.ok(state, '开局后应有 state 广播');
-    assert.equal(state.tanks.length, 7);
+    assert.equal(state.tanks.length, 10);
     for (const t of state.tanks) {
       assert.ok(t.spawnProtect > SPAWN_PROTECT_TIME - 1 && t.spawnProtect <= SPAWN_PROTECT_TIME,
         `spawnProtect 异常: ${t.spawnProtect}`);

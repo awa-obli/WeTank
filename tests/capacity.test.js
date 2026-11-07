@@ -1,8 +1,8 @@
 'use strict';
 
-// 7 人房间的端到端测试（需要先启动服务端，默认连 ws://127.0.0.1:8080）：
-//   1. 7 名玩家可以依次加入，第 8 人被拒绝且提示"最多7人"；
-//   2. 7 人开局后 state 里有 7 辆坦克，出生格互不重复；
+// 10 人房间的端到端测试（需要先启动服务端，默认连 ws://127.0.0.1:8080）：
+//   1. 10 名玩家可以依次加入，第 11 人被拒绝且提示"最多10人"；
+//   2. 10 人开局后 state 里有 10 辆坦克，出生格互不重复；
 //   3. 出生保护：开局时接近 3 秒，开火会立即清零，未开火的玩家约 3 秒后归零。
 
 const WebSocket = require('ws');
@@ -64,20 +64,20 @@ async function main() {
   const code = joined.code;
 
   const clients = [{ ...host, playerId: joined.playerId }];
-  for (let i = 2; i <= 7; i++) {
+  for (let i = 2; i <= 10; i++) {
     const c = await connect();
     send(c, { type: 'join_room', name: `队员${i}`, code });
     const j = await waitForMsg(c, (m) => m.type === 'joined', `joined(队员${i})`);
     clients.push({ ...c, playerId: j.playerId });
   }
-  await waitForMsg(host, (m) => m.type === 'room_update' && m.players.length === 7, 'room_update(7人)');
-  check(true, '7 名玩家可以依次加入');
+  await waitForMsg(host, (m) => m.type === 'room_update' && m.players.length === 10, 'room_update(10人)');
+  check(true, '10 名玩家可以依次加入');
 
-  // ---------- 第 8 人被拒绝 ----------
+  // ---------- 第 11 人被拒绝 ----------
   const extra = await connect();
-  send(extra, { type: 'join_room', name: '第八人', code });
+  send(extra, { type: 'join_room', name: '第十一人', code });
   const err = await waitForMsg(extra, (m) => m.type === 'error', 'error(满房)');
-  check(/最多\s*7\s*人/.test(err.message), `第 8 人被拒绝：${err.message}`);
+  check(/最多\s*10\s*人/.test(err.message), `第 11 人被拒绝：${err.message}`);
   extra.ws.close();
 
   // ---------- 开局 ----------
@@ -94,7 +94,7 @@ async function main() {
 
   send(host, { type: 'start_game' });
   const start = await waitForMsg(host, (m) => m.type === 'game_start', 'game_start');
-  check(start.players.length === 7, `开局广播包含 7 名玩家（实际 ${start.players.length}）`);
+  check(start.players.length === 10, `开局广播包含 10 名玩家（实际 ${start.players.length}）`);
 
   async function waitForState(predicate, label, timeoutMs = 5000) {
     const deadline = Date.now() + timeoutMs;
@@ -107,9 +107,9 @@ async function main() {
   }
 
   const cell = start.maze.cell;
-  const first = await waitForState((m) => m.tanks.length === 7, 'state(7 辆坦克)');
+  const first = await waitForState((m) => m.tanks.length === 10, 'state(10 辆坦克)');
   const cells = first.tanks.map((t) => `${Math.floor(t.x / cell)},${Math.floor(t.y / cell)}`);
-  check(new Set(cells).size === 7, `7 人出生格互不重复（${new Set(cells).size}/7）`);
+  check(new Set(cells).size === 10, `10 人出生格互不重复（${new Set(cells).size}/10）`);
   check(
     first.tanks.every((t) => t.spawnProtect > SPAWN_PROTECT_TIME - 1 && t.spawnProtect <= SPAWN_PROTECT_TIME),
     `开局全员带出生保护（约 ${SPAWN_PROTECT_TIME} 秒）`
@@ -137,7 +137,7 @@ async function main() {
   const elapsed = Date.now() - startedAt;
   await sleep(Math.max(0, SPAWN_PROTECT_TIME * 1000 + 600 - elapsed));
   const expired = await waitForState(
-    (m) => m.tanks.length === 7 && m.tanks.every((t) => t.spawnProtect === 0),
+    (m) => m.tanks.length === 10 && m.tanks.every((t) => t.spawnProtect === 0),
     'state(保护全部过期)',
     3000
   );

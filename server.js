@@ -61,15 +61,35 @@ const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
 
 // ---------- 游戏模式 ----------
 // brawl（大乱斗）是默认模式：单局连续死斗，阵亡 10 秒后在随机位置复活，
-// 先达到房间设置的击杀目标者获胜；classic（经典模式）保留原玩法：
+// 先达到房间设置的击杀目标者获胜；team（团队模式）沿用大乱斗的复活节奏，
+// 但按红蓝两队累计击杀，先达到目标的队伍获胜；classic（经典模式）保留原玩法：
 // 淘汰制回合计分，先达到房间设置的胜利分数者获胜。
 const MODES = {
   brawl: { key: 'brawl', name: '大乱斗' },
+  team: { key: 'team', name: '团队模式' },
   classic: { key: 'classic', name: '经典模式' },
 };
 const DEFAULT_MODE = 'brawl';
 
-// 大乱斗：复活等待时长（秒，固定）与击杀目标（房间级设置，房主可改）
+// 团队模式的固定队伍配置。服务端只下发队伍 key，名称和颜色由客户端按同一份配置渲染；
+// 红/蓝两色沿用原有色板，保证坦克、HUD、结算文案视觉一致。
+const TEAMS = {
+  red: { key: 'red', name: '红队', color: '#E63946' },
+  blue: { key: 'blue', name: '蓝队', color: '#3A86FF' },
+};
+const TEAM_KEYS = ['red', 'blue'];
+
+function otherTeam(team) {
+  return team === 'red' ? 'blue' : 'red';
+}
+
+// 大乱斗和团队模式都是"连续复活、击杀目标定胜负"，只有经典模式没有复活机制。
+function hasRespawn(mode) {
+  return mode === 'brawl' || mode === 'team';
+}
+
+// 大乱斗 / 团队模式：复活等待时长（秒，固定）与击杀目标（房间级设置，房主可改）。
+// 团队模式复用一个 killTarget，只是它的含义从"个人击杀"变成"队伍总击杀"。
 const BRAWL_RESPAWN_DELAY = 10;
 const DEFAULT_KILL_TARGET = 10;
 const MIN_KILL_TARGET = 5;
@@ -91,8 +111,11 @@ const BULLET_DAMAGE = 1;
 const REPAIR_HEAL = 1;
 
 // 色板长度必须 >= MAX_PLAYERS，否则房间没满就可能出现两人同色。
-const PLAYER_COLORS = ['#E63946', '#3A86FF', '#FFD60A', '#06D6A0', '#FF8A3D', '#C77DFF', '#FF5DA2'];
-const MAX_PLAYERS = 7;
+const PLAYER_COLORS = [
+  '#E63946', '#3A86FF', '#FFD60A', '#06D6A0', '#FF8A3D',
+  '#C77DFF', '#FF5DA2', '#00C2FF', '#A8E10C', '#F2FBF9',
+];
+const MAX_PLAYERS = 10;
 // 房间名只用于列表展示，限制长度并清理控制字符即可；重名允许，房间码才是唯一标识。
 const MAX_ROOM_NAME = 20;
 
@@ -142,6 +165,8 @@ function makeId() {
 function makePlayer(id, name, ws, room) {
   return {
     id, name, ws, color: room.assignColor(),
+    // 团队模式下的队伍 key（red / blue）；大乱斗和经典模式保持 null。
+    team: null,
     score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
     input: { forward: false, backward: false, left: false, right: false, shoot: false },
     shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
@@ -301,6 +326,9 @@ class Room {
     this.mode = DEFAULT_MODE;
     this.killTarget = DEFAULT_KILL_TARGET;
     this.winScore = DEFAULT_WIN_SCORE;
+    // 团队模式专用：每队累计击杀数。个人击杀仍记在 p.score，团队分是独立的房间级统计，
+    // 这样中途有人离开时，他此前为队伍拿到的分不会跟着消失。
+    this.teamKills = { red: 0, blue: 0 };
     const preset = MAP_PRESETS[this.mapSize];
     this.cols = preset.cols;
     this.rows = preset.rows;
@@ -341,6 +369,8 @@ class Room {
       id: p.id,
       name: p.name,
       color: p.color,
+      // 团队模式：red / blue；其他模式为 null，客户端据此决定是否显示队伍徽章。
+      team: p.team || null,
       score: p.score,
       connected: true,
     }));
@@ -357,14 +387,81 @@ class Room {
   assignColor() {
     const used = new Set([...this.players.values()].map((p) => p.color));
     const free = PLAYER_COLORS.filter((c) => !used.has(c));
-    return free.length ? free[0] : '#F2FBF9'; // 色板用完只是兜底，正常情况下 7 人以内不会走到这里
+    return free.length ? free[0] : '#F2FBF9'; // 色板用完只是兜底，正常情况下 10 人以内不会走到这里
+  }
+
+  // ---------- 团队模式：分队 ----------
+  // team 只保存队伍 key，名称/颜色由客户端按同一份 TEAM 配置渲染。
+  teamCount(team) {
+    let n = 0;
+    for (const p of this.players.values()) {
+      if (p.team === team) n += 1;
+    }
+    return n;
+  }
+
+  teamCounts() {
+    return { red: this.teamCount('red'), blue: this.teamCount('blue') };
+  }
+
+  // 新玩家自动补到人少的一队；人数相同时优先红队，保证连续加入时两队人数差不超过 1。
+  assignTeam(p) {
+    const counts = this.teamCounts();
+    p.team = counts.red <= counts.blue ? 'red' : 'blue';
+  }
+
+  setPlayerTeam(p, team) {
+    if (!p || !Object.prototype.hasOwnProperty.call(TEAMS, team)) return false;
+    p.team = team;
+    return true;
+  }
+
+  // 切到团队模式、观战者转正等场景下补齐没有队伍的人；已有的分队不会被覆盖。
+  ensureTeams() {
+    if (this.mode !== 'team') return;
+    for (const p of this.players.values()) {
+      if (!Object.prototype.hasOwnProperty.call(TEAMS, p.team || '')) this.assignTeam(p);
+    }
+  }
+
+  // 重新分队：洗牌后按红蓝交替分配，人数差最多 1；起始队伍随机，
+  // 避免每次洗牌都是红队多一人。
+  shuffleTeams() {
+    const ids = [...this.players.keys()];
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    const start = Math.random() < 0.5 ? 'red' : 'blue';
+    ids.forEach((id, i) => {
+      const p = this.players.get(id);
+      if (p) p.team = i % 2 === 0 ? start : otherTeam(start);
+    });
+  }
+
+  resetTeamKills() {
+    this.teamKills = { red: 0, blue: 0 };
+  }
+
+  // 对局中某一队的人全部离开：即使总人数仍然 >= 2，也无法继续团队对抗。
+  teamDepleted() {
+    return this.mode === 'team' && this.state !== 'lobby'
+      && (this.teamCount('red') === 0 || this.teamCount('blue') === 0);
   }
 
   startMatch() {
+    // 团队模式开赛前再兜底一次分队，并拒绝"某一队没人"的开局。
+    if (this.mode === 'team') {
+      this.ensureTeams();
+      const counts = this.teamCounts();
+      if (counts.red === 0 || counts.blue === 0) return false;
+    }
     for (const p of this.players.values()) p.score = 0;
+    this.resetTeamKills();
     this.state = 'playing';
     this.startRound();
     broadcastRoomList(); // 房间列表里的状态从"等待中"变成"游戏中"
+    return true;
   }
 
   // 开局广播也用于中途加入的观战者补发快照：extra 里可以带 spectating: true。
@@ -381,6 +478,8 @@ class Room {
       mode: this.mode,
       killTarget: this.killTarget,
       winScore: this.winScore,
+      // 团队模式开局清零；非团队模式也带一个全 0 的对象，客户端可以无脑读取。
+      teamKills: { ...this.teamKills },
       respawnDelay: BRAWL_RESPAWN_DELAY,
       // 重生动画总时长（秒）：客户端用它把每帧的剩余时间换算成缩放/透明度进度。
       spawnMaterialize: SPAWN_MATERIALIZE_TIME,
@@ -400,9 +499,11 @@ class Room {
         alive: p.alive,
         hp: p.hp,
         color: p.color,
+        // 团队模式：red / blue；其他模式为 null。
+        team: p.team || null,
         name: p.name,
-        // 大乱斗里 score 就是击杀数；经典模式里是回合胜场数。
-        // 大乱斗没有 round_end 可以带分数，所以必须在每帧 state 里实时同步。
+        // 大乱斗 / 团队模式里 score 就是个人击杀数；经典模式里是回合胜场数。
+        // 这两种模式没有 round_end 可以带分数，所以必须在每帧 state 里实时同步。
         score: p.score,
         shield: p.shield,
         speedBoost: p.speedBoostRemaining > 0,
@@ -421,6 +522,8 @@ class Room {
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
       items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
+      // 团队总击杀：和每帧 state 一起下发，客户端 HUD 只在这个值变化时重建。
+      teamKills: { ...this.teamKills },
       spectators: this.spectatorList(),
     };
   }
@@ -443,7 +546,7 @@ class Room {
     }
     this.pendingWinnerId = null;
     // 出生点每回合重新随机，范围覆盖整张地图的所有格心（见 spawn.js）。
-    // 当前规则只要求不和其他玩家落在同一格，7 人以内任意人数都放得下；
+    // 当前规则只要求不和其他玩家落在同一格，10 人以内任意人数都放得下；
     // 朝向也是完全随机，出生后往哪边开由玩家自己决定。
     const spawns = pickSpawnCells({
       cols: this.cols,
@@ -485,9 +588,9 @@ class Room {
 
   tick() {
     if (this.state !== 'playing' && this.state !== 'round_pending') return;
-    // 大乱斗：先推进阵亡玩家的复活倒计时，到点的人在这一帧重新上场；
+    // 大乱斗 / 团队模式：先推进阵亡玩家的复活倒计时，到点的人在这一帧重新上场；
     // 随后再统一计算存活名单，复活者会带着出生动画进入下面的移动/碰撞逻辑。
-    if (this.mode === 'brawl' && this.state === 'playing') this.updateRespawns();
+    if (hasRespawn(this.mode) && this.state === 'playing') this.updateRespawns();
     const alivePlayers = [...this.players.values()].filter((p) => p.alive);
 
     // --- 坦克移动 ---
@@ -579,6 +682,8 @@ class Room {
           this.bullets.push({
             id: this.nextBulletId++,
             owner: p.id,
+            // 发射瞬间记录队伍：关闭友伤、以及击杀者中途离场后的团队分归属都依赖它。
+            team: p.team || null,
             x: bx,
             y: by,
             vx: Math.cos(shotAngle) * BULLET_SPEED,
@@ -672,14 +777,19 @@ class Room {
     const damageHits = [];  // 本帧真正造成伤害的命中，循环结束后统一广播给客户端做反馈
     for (const b of this.bullets) {
       b.age += DT;
+      // 子弹发射时记录过队伍；老测试/旧子弹没有这个字段时按当前 owner 兜底。
+      const bulletOwner = this.players.get(b.owner);
+      const bulletTeam = b.team || (bulletOwner ? bulletOwner.team : null);
 
       // 追踪弹：每帧朝当前最近的存活敌方坦克小幅修正飞行方向（限速转向，
       // 不是瞬间锁死），速度大小保持不变，所以拐弯躲开是甩得掉的。
+      // 团队模式下只锁敌人，不会转头去追队友。
       if (b.homing) {
         let target = null;
         let bestDist2 = Infinity;
         for (const p of solidPlayers) {
           if (p.id === b.owner) continue;
+          if (this.mode === 'team' && bulletTeam && p.team === bulletTeam) continue;
           const ddx = p.x - b.x;
           const ddy = p.y - b.y;
           const dist2 = ddx * ddx + ddy * ddy;
@@ -717,6 +827,8 @@ class Room {
 
         for (const p of solidPlayers) {
           if (b.owner === p.id && b.age < BULLET_OWNER_GRACE) continue;
+          // 团队模式关闭友伤：子弹直接穿过队友（自己的跳弹仍然可以命中自己）。
+          if (this.mode === 'team' && bulletTeam && p.team === bulletTeam && p.id !== b.owner) continue;
           const ddx = b.x - p.x;
           const ddy = b.y - p.y;
           if (ddx * ddx + ddy * ddy < (BULLET_RADIUS + TANK_RADIUS) * (BULLET_RADIUS + TANK_RADIUS)) {
@@ -737,8 +849,8 @@ class Room {
               if (p.hp <= 0) {
                 p.alive = false;
                 p.lastHitBy = b.owner;
-                if (this.mode === 'brawl') {
-                  // 大乱斗里阵亡不是退场：开始 10 秒复活倒计时，由 updateRespawns 放回场上。
+                if (hasRespawn(this.mode)) {
+                  // 大乱斗 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，由 updateRespawns 放回场上。
                   p.respawnRemaining = BRAWL_RESPAWN_DELAY;
                   // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
                   p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
@@ -746,6 +858,14 @@ class Room {
                   // 已经阵亡的击杀者生前打出的子弹仍然算他的击杀。
                   const killer = this.players.get(b.owner);
                   if (killer && killer.id !== p.id) killer.score += 1;
+                  // 团队总分独立累计：只统计跨队击杀，自杀不计。
+                  // 击杀者中途离场时用子弹上记录的 team，保证这一分仍归原队伍。
+                  if (this.mode === 'team') {
+                    const killerTeam = (killer && killer.team) || b.team || null;
+                    if (killerTeam && p.team && killerTeam !== p.team) {
+                      this.teamKills[killerTeam] += 1;
+                    }
+                  }
                 }
               }
               damageHits.push({
@@ -808,6 +928,26 @@ class Room {
       }
     }
 
+    // --- 团队模式胜负判断 ---
+    // 任意一队总击杀达到目标即结束整场。同一 tick 两队同时达标时先比总击杀，
+    // 完全相同则判平局（返回大厅，不记胜者）。
+    if (this.mode === 'team') {
+      const reached = TEAM_KEYS.filter((team) => this.teamKills[team] >= this.killTarget);
+      if (reached.length > 0) {
+        let winnerTeam = null;
+        if (reached.length === 1) {
+          winnerTeam = reached[0];
+        } else {
+          const [a, b] = reached;
+          if (this.teamKills[a] !== this.teamKills[b]) {
+            winnerTeam = this.teamKills[a] > this.teamKills[b] ? a : b;
+          }
+        }
+        this.endTeamMatch(winnerTeam, winnerTeam ? null : 'draw');
+        return;
+      }
+    }
+
     // --- 经典模式回合结束判断 ---
     // 只剩 1 人（或恰好 0 人，双方同归于尽）存活时不立即结束回合，而是进入 5 秒观察期：
     // 一方面给死亡爆炸特效留出播放时间，另一方面场上可能还有飞行中的子弹，
@@ -836,7 +976,7 @@ class Room {
     }
   }
 
-  // ---------- 大乱斗复活 ----------
+  // ---------- 大乱斗 / 团队模式复活 ----------
   // 阵亡玩家的倒计时只在比赛进行中推进；每减去一个 DT 就检查是否到点。
   // 浮点累减会有极小误差，用 1e-6 容差兜住，保证正好 10 秒（300 tick）复活。
   updateRespawns() {
@@ -963,11 +1103,36 @@ class Room {
     for (const s of this.spectators.values()) {
       const p = makePlayer(s.id, s.name, s.ws, this);
       this.players.set(p.id, p);
+      // 团队模式下转正的人也要立刻分到人少的一队，大厅才能直接显示队伍。
+      if (this.mode === 'team') this.assignTeam(p);
     }
     this.spectators.clear();
     if (!this.hostId || !this.players.has(this.hostId)) {
       this.hostId = [...this.players.keys()][0] || null;
     }
+  }
+
+  // 团队模式整场结束：目标击杀达成或同 tick 双达标平局。
+  // winnerTeam 为 null 且 reason === 'draw' 表示平局；普通胜负时 reason 为 null。
+  endTeamMatch(winnerTeam, reason = null) {
+    this.stopTicking();
+    this.state = 'lobby';
+    this.promoteSpectators();
+    this.broadcast({
+      type: 'match_end',
+      winnerId: null,
+      winnerTeam,
+      teamKills: { ...this.teamKills },
+      scores: this.playerList(),
+      hostId: this.hostId,
+      spectators: [],
+      reason,
+      mode: this.mode,
+      killTarget: this.killTarget,
+      winScore: this.winScore,
+    });
+    this.broadcastRoom();
+    broadcastRoomList();
   }
 
   // 人数不足、最后一名正式玩家离开等情况下提前结束整场比赛。
@@ -978,6 +1143,8 @@ class Room {
     this.broadcast({
       type: 'match_end',
       winnerId: null,
+      winnerTeam: null,
+      teamKills: { ...this.teamKills },
       scores: this.playerList(),
       hostId: this.hostId,
       spectators: [],
@@ -998,6 +1165,8 @@ class Room {
       this.broadcast({
         type: 'match_end',
         winnerId: champion.id,
+        winnerTeam: null,
+        teamKills: { ...this.teamKills },
         scores: this.playerList(),
         hostId: this.hostId,
         spectators: [],
@@ -1078,7 +1247,7 @@ function roomSummary(room) {
   return {
     code: room.code,
     name: room.name,
-    // 列表里的"人数"包含正式玩家和观战者，与 7 人上限保持一致。
+    // 列表里的"人数"包含正式玩家和观战者，与 10 人上限保持一致。
     playerCount: room.memberCount(),
     maxPlayers: MAX_PLAYERS,
     state: room.state,
@@ -1203,6 +1372,8 @@ wss.on('connection', (ws) => {
       playerId = makeId();
       const player = makePlayer(playerId, name, ws, room);
       room.players.set(playerId, player);
+      // 团队模式大厅里加入的新玩家直接补到人少的一队；其他模式保持 team=null。
+      if (room.mode === 'team') room.assignTeam(player);
       currentRoom = room;
       ws._roomCode = code;
       ws.send(JSON.stringify({
@@ -1286,6 +1457,8 @@ wss.on('connection', (ws) => {
       }
       if (currentRoom.mode !== mode) {
         currentRoom.mode = mode;
+        // 切到团队模式时，把还没有队伍的人自动补到人少的一队。
+        if (mode === 'team') currentRoom.ensureTeams();
         currentRoom.broadcastRoom();
       }
       return;
@@ -1300,8 +1473,8 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改击杀目标' }));
         return;
       }
-      if (currentRoom.mode !== 'brawl') {
-        ws.send(JSON.stringify({ type: 'error', message: '只有大乱斗模式可以设置击杀目标' }));
+      if (currentRoom.mode !== 'brawl' && currentRoom.mode !== 'team') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有大乱斗/团队模式可以设置击杀目标' }));
         return;
       }
       const kills = parseInteger(msg.kills);
@@ -1341,13 +1514,66 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 团队模式：房主在大厅手动换队。只允许在团队模式下调整，避免其他模式出现无意义的队伍字段。
+    if (msg.type === 'set_player_team') {
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以调整队伍' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能调整队伍' }));
+        return;
+      }
+      if (currentRoom.mode !== 'team') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有团队模式可以调整队伍' }));
+        return;
+      }
+      const target = currentRoom.players.get(String(msg.targetId || ''));
+      if (!target) {
+        ws.send(JSON.stringify({ type: 'error', message: '玩家不存在或已离开房间' }));
+        return;
+      }
+      const team = String(msg.team || '');
+      if (!Object.prototype.hasOwnProperty.call(TEAMS, team)) {
+        ws.send(JSON.stringify({ type: 'error', message: '无效的队伍' }));
+        return;
+      }
+      if (target.team !== team) {
+        currentRoom.setPlayerTeam(target, team);
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'shuffle_teams') {
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以重新分队' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能重新分队' }));
+        return;
+      }
+      if (currentRoom.mode !== 'team') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有团队模式可以重新分队' }));
+        return;
+      }
+      currentRoom.shuffleTeams();
+      currentRoom.broadcastRoom();
+      return;
+    }
+
     if (msg.type === 'start_game') {
       if (currentRoom.hostId !== playerId) return;
       if (currentRoom.players.size < 2) {
         ws.send(JSON.stringify({ type: 'error', message: '至少需要2名玩家才能开始' }));
         return;
       }
-      currentRoom.startMatch();
+      // startMatch 内部会再兜底分队；返回 false 表示两队没有都分到人。
+      if (!currentRoom.startMatch()) {
+        ws.send(JSON.stringify({ type: 'error', message: '团队模式需要红蓝两队都至少有一名玩家' }));
+        return;
+      }
       return;
     }
 
@@ -1398,6 +1624,9 @@ wss.on('connection', (ws) => {
         }
       } else if (room.state !== 'lobby' && room.players.size < 2) {
         // 人数不够继续比赛：提前结束整场，观战者一并转正回大厅。
+        room.finishMatch('not_enough_players');
+      } else if (room.teamDepleted()) {
+        // 团队模式下总人数还够，但某一队已经没人了，无法继续对抗。
         room.finishMatch('not_enough_players');
       } else {
         room.broadcastRoom();
@@ -1460,6 +1689,8 @@ module.exports = {
   MAP_PRESETS,
   MODES,
   DEFAULT_MODE,
+  TEAMS,
+  TEAM_KEYS,
   BRAWL_RESPAWN_DELAY,
   DEFAULT_KILL_TARGET,
   MIN_KILL_TARGET,

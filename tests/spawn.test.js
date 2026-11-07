@@ -1,7 +1,7 @@
 'use strict';
 
 // 随机出生点的单元测试（node --test 直接跑，不依赖服务端）：
-//   1. 三种地图档位下都能给 7 人找到位置，且互不重复；
+//   1. 三种地图档位下都能给 10 人找到位置，且互不重复；
 //   2. 所有出生点都落在格子中心，且在网格范围内；
 //   3. 换种子/多跑若干次，出生点确实在变（不是每次都一样）；
 //   4. count 超过格子总数时封顶，不会返回不存在的格子；
@@ -17,7 +17,7 @@ const PRESETS = {
   medium: { cols: 12, rows: 8 },
   large: { cols: 15, rows: 10 },
 };
-const MAX_PLAYERS = 7;
+const MAX_PLAYERS = 10;
 
 // mulberry32：足够小的确定性 PRNG，让"随机"测试可复现
 function makeRng(seed) {
@@ -48,7 +48,7 @@ function assertValidSpawns(spots, cols, rows, count) {
 }
 
 for (const [name, preset] of Object.entries(PRESETS)) {
-  test(`${name} 地图：7 人出生点互不重复且都在格心`, () => {
+  test(`${name} 地图：10 人出生点互不重复且都在格心`, () => {
     const rng = makeRng(1234);
     // 多跑几十次，覆盖不同的洗牌结果
     for (let round = 0; round < 200; round++) {

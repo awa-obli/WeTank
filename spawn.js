@@ -10,7 +10,7 @@
  *
  * 当前规则（需求确认过）：只要求玩家不在同一个格子，不额外限制两人之间的最小间隔。
  * 因此一次 Fisher-Yates 洗牌 + 取前 N 个即可，天然互不重复；最小地图 9×6=54 个
- * 格子，7 人永远放得下，count 超过格子总数时按格子总数封顶（防御性处理）。
+ * 格子，10 人永远放得下，count 超过格子总数时按格子总数封顶（防御性处理）。
  */
 function pickSpawnCells({ cols, rows, cell, count, rand = Math.random }) {
   const total = cols * rows;

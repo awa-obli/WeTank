@@ -99,18 +99,25 @@
 <section id="view-lobby" class="view hidden">
   <div class="lobby-wrap">
     <div class="lobby-grid">
-      <!-- 左列：房间码 + 玩家列表 -->
-      <div class="lobby-main">
-        <div class="ticket">
-          <span class="ticket-label">房间名</span>
-          <span id="lobby-name" class="ticket-name">----</span>
-          <div class="ticket-code-row">
-            <span class="ticket-label">房间码</span>
-            <span id="lobby-code" class="ticket-code">----</span>
+      <!-- 左列：房间码 + 玩家列表 + 开始/离开按钮；按钮紧跟列表，不被右侧设置面板拉出空档 -->
+      <div class="lobby-left">
+        <div class="lobby-main">
+          <div class="ticket">
+            <span class="ticket-label">房间名</span>
+            <span id="lobby-name" class="ticket-name">----</span>
+            <div class="ticket-code-row">
+              <span class="ticket-label">房间码</span>
+              <span id="lobby-code" class="ticket-code">----</span>
+            </div>
           </div>
+
+          <div class="player-list" id="lobby-players"></div>
         </div>
 
-        <div class="player-list" id="lobby-players"></div>
+        <div class="lobby-actions">
+          <button id="btn-start" class="btn btn-primary" disabled>等待玩家加入…</button>
+          <button id="btn-leave-lobby" class="btn btn-ghost">离开房间</button>
+        </div>
       </div>
 
       <!-- 右列：游戏设置（模式与胜负目标、地图大小、初始血量） -->
@@ -123,8 +130,14 @@
             <div id="mode-picker" class="mode-picker" role="group" aria-label="游戏模式"></div>
             <p id="mode-desc" class="mode-desc"></p>
           </div>
+          <div id="team-group" class="settings-group hidden">
+            <span class="settings-label">队伍</span>
+            <p id="team-summary" class="team-summary"></p>
+            <p id="team-warning" class="team-warning hidden"></p>
+            <button id="btn-shuffle-teams" class="btn btn-ghost team-shuffle" type="button">重新分队</button>
+          </div>
           <div id="kill-target-group" class="settings-group hidden">
-            <span class="settings-label">击杀目标</span>
+            <span id="kill-target-label" class="settings-label">击杀目标</span>
             <div class="hp-control">
               <button id="btn-kills-minus" class="hp-step" type="button" aria-label="减少击杀目标">−</button>
               <input id="kills-input" class="hp-input" type="number" inputmode="numeric" min="5" max="30" step="1" value="10" autocomplete="off" aria-label="击杀目标（5 到 30）" />
@@ -153,11 +166,6 @@
           </div>
         </div>
       </aside>
-
-      <div class="lobby-actions">
-        <button id="btn-start" class="btn btn-primary" disabled>等待玩家加入…</button>
-        <button id="btn-leave-lobby" class="btn btn-ghost">离开房间</button>
-      </div>
     </div>
   </div>
 </section>

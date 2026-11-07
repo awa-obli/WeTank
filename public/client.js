@@ -46,6 +46,7 @@
   const modePickerEl = document.getElementById('mode-picker');
   const modeDescEl = document.getElementById('mode-desc');
   const killTargetGroup = document.getElementById('kill-target-group');
+  const killTargetLabelEl = document.getElementById('kill-target-label');
   const killTargetInputEl = document.getElementById('kills-input');
   const btnKillsMinus = document.getElementById('btn-kills-minus');
   const btnKillsPlus = document.getElementById('btn-kills-plus');
@@ -53,6 +54,10 @@
   const winScoreInputEl = document.getElementById('win-score-input');
   const btnWinMinus = document.getElementById('btn-win-minus');
   const btnWinPlus = document.getElementById('btn-win-plus');
+  const teamGroupEl = document.getElementById('team-group');
+  const teamSummaryEl = document.getElementById('team-summary');
+  const teamWarningEl = document.getElementById('team-warning');
+  const btnShuffleTeams = document.getElementById('btn-shuffle-teams');
   const btnStart = document.getElementById('btn-start');
   const btnLeaveLobby = document.getElementById('btn-leave-lobby');
 
@@ -95,9 +100,11 @@
   const NICKNAME_KEY = 'tank.nickname';
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
-  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ classic=经典模式
-  let killTarget = 10; // 大乱斗胜利所需击杀数，以服务端广播为准
+  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ team=团队模式 / classic=经典模式
+  let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
   let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
+  let teamKills = { red: 0, blue: 0 }; // 团队模式：红蓝两队总击杀，以 state / match_end 为准
+  let myTeam = null; // 自己所在队伍（red / blue），非团队模式或观战时为 null
   let respawnDelay = 10; // 大乱斗复活等待秒数，以服务端广播为准（仅用于文案）
   const MIN_HP = 1;
   const MAX_HP = 10;
@@ -124,14 +131,45 @@
     { key: 'medium', name: '中', cols: 12, rows: 8 },
     { key: 'large', name: '大', cols: 15, rows: 10 },
   ];
-  // 与服务端 MODES 一一对应。大乱斗是默认模式，经典模式保留原有的淘汰制玩法。
+  // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式沿用大乱斗的复活节奏，
+  // 经典模式保留原有的淘汰制玩法。
   const MODE_OPTIONS = [
     { key: 'brawl', name: '大乱斗', tagline: '10 秒复活 · 击杀定胜负' },
+    { key: 'team', name: '团队模式', tagline: '红蓝对抗 · 团队击杀定胜负' },
     { key: 'classic', name: '经典模式', tagline: '一条命 · 回合定胜负' },
   ];
   function modeName(key) {
     const found = MODE_OPTIONS.find((m) => m.key === key);
     return found ? found.name : '大乱斗';
+  }
+
+  // 与服务端 TEAMS 一一对应。服务端只下发队伍 key，名称/颜色在客户端统一映射，
+  // 坦克、HUD、大厅徽章和结算文案都走这一份配置。
+  const TEAM_META = {
+    red: { name: '红队', color: '#E63946' },
+    blue: { name: '蓝队', color: '#3A86FF' },
+  };
+  const TEAM_KEYS = ['red', 'blue'];
+  function teamName(key) {
+    return TEAM_META[key] ? TEAM_META[key].name : '未分队';
+  }
+  function teamColor(key) {
+    return TEAM_META[key] ? TEAM_META[key].color : '#F2FBF9';
+  }
+  function otherTeamKey(key) {
+    return key === 'red' ? 'blue' : 'red';
+  }
+  function isTeamMode() {
+    return mode === 'team';
+  }
+  // 大乱斗和团队模式都有 10 秒复活；经典模式没有。
+  function hasRespawn() {
+    return mode === 'brawl' || mode === 'team';
+  }
+  // 团队模式下坦克/爆炸统一使用队伍色；个人颜色只在非团队模式使用。
+  function displayColor(t) {
+    if (isTeamMode() && t && TEAM_META[t.team]) return TEAM_META[t.team].color;
+    return (t && t.color) || '#F2FBF9';
   }
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
@@ -329,6 +367,9 @@
   });
 
   btnStart.addEventListener('click', () => send({ type: 'start_game' }));
+  btnShuffleTeams.addEventListener('click', () => {
+    if (myId === hostId && isTeamMode()) send({ type: 'shuffle_teams' });
+  });
   btnLeaveLobby.addEventListener('click', () => {
     send({ type: 'leave_room' });
     resetAfterLeave();
@@ -357,11 +398,15 @@
         players = msg.players || [];
         spectators = msg.spectators || [];
         spectating = !!msg.spectating;
+        // 每次进新房都从零开始，避免上一场大厅残留的团队分/队伍高亮。
+        teamKills = { red: 0, blue: 0 };
+        myTeam = null;
         // 中途加入的观战者不播开局公告；只有以玩家身份进入下一场时才欠一次展示。
         matchIntroPending = !spectating;
         mapSize = msg.mapSize || 'medium';
         maxHp = msg.maxHp || 5;
         syncModeSettings(msg);
+        syncMyTeam();
         lobbyCodeEl.textContent = roomCode;
         lobbyNameEl.textContent = roomName || '未命名房间';
         roomsErrorEl.textContent = '';
@@ -403,6 +448,7 @@
         mapSize = msg.mapSize || mapSize;
         maxHp = msg.maxHp || maxHp;
         syncModeSettings(msg);
+        syncMyTeam();
         lobbyNameEl.textContent = roomName || '未命名房间';
         renderLobby();
         // 游戏中玩家进出不一定伴随 state 变化，这里立即按最新名单重建顶部标签。
@@ -428,6 +474,7 @@
         spectators = msg.spectators || [];
         // 观战快照会显式带 spectating；下一回合的普通 game_start 则通过"自己是否在 players 里"判断。
         spectating = !!msg.spectating || !players.some((p) => p.id === myId);
+        syncMyTeam();
         // 消费本场的公告机会：只有以玩家身份进入对局才展示，观战快照不展示。
         const showIntro = matchIntroPending && !spectating;
         matchIntroPending = false;
@@ -471,11 +518,13 @@
         spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
         const activeChanged = syncPlayersFromTanks(msg.tanks);
         const scoreChanged = syncScoresFromTanks(msg.tanks);
+        const teamChanged = syncTeamKills(msg.teamKills);
         const specChanged = prevSpecIds !== spectators.map((s) => s.id).join('|');
         if (myId) {
           if (players.some((p) => p.id === myId)) spectating = false;
           else if (spectators.some((s) => s.id === myId)) spectating = true;
         }
+        syncMyTeam();
 
         detectDeaths(msg.tanks);
         updateSpeedTrails(msg.tanks);
@@ -483,7 +532,8 @@
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
-        if (activeChanged || specChanged || scoreChanged) renderHud(); // 名单有进出或击杀数变化时立即重建顶部标签
+        // 名单有进出、个人击杀数或团队总击杀变化时立即重建顶部标签。
+        if (activeChanged || specChanged || scoreChanged || teamChanged) renderHud();
         syncSelfState(); // 自己阵亡/观战时收起触屏控件并清空输入
         applyJoystickSteering(); // 用刚收到的最新朝向重新计算该转左还是转右
         renderHudFromTanks();
@@ -543,6 +593,7 @@
           if (players.some((p) => p.id === myId)) spectating = false;
           else if (spectators.some((s) => s.id === myId)) spectating = true;
         }
+        syncMyTeam();
         updateSpectatorUi();
         renderHud();
         renderHudFromTanks();
@@ -552,6 +603,14 @@
         hideMatchIntro();
         if (msg.reason === 'not_enough_players') {
           overlayTitle.textContent = '对手已离开';
+          overlaySub.textContent = '即将返回房间…';
+        } else if (mode === 'team') {
+          // 团队模式：winnerTeam 为 null 表示同 tick 双达标平局。
+          if (msg.winnerTeam && TEAM_META[msg.winnerTeam]) {
+            overlayTitle.textContent = `🏆 ${teamName(msg.winnerTeam)} 以 ${teamKills[msg.winnerTeam]} 杀赢得整场比赛！`;
+          } else {
+            overlayTitle.textContent = '平局！';
+          }
           overlaySub.textContent = '即将返回房间…';
         } else if (mode === 'brawl') {
           const champion = players.find((p) => p.id === msg.winnerId);
@@ -579,11 +638,34 @@
   }
 
   // 房间级模式设置统一从服务端消息同步，避免 joined / room_update / game_start 各写一套。
+  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 team 会被静默改成大乱斗。
   function syncModeSettings(msg) {
-    mode = msg.mode === 'classic' ? 'classic' : 'brawl';
+    if (msg.mode === 'brawl' || msg.mode === 'team' || msg.mode === 'classic') {
+      mode = msg.mode;
+    } else {
+      mode = 'brawl';
+    }
     if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
     if (Number.isInteger(msg.winScore)) winScore = msg.winScore;
     if (Number.isFinite(msg.respawnDelay)) respawnDelay = msg.respawnDelay;
+    if (msg.teamKills && typeof msg.teamKills === 'object') syncTeamKills(msg.teamKills);
+  }
+
+  // 团队总击杀只在真的变化时返回 true，避免 30Hz 的 state 反复重建 HUD DOM。
+  function syncTeamKills(raw) {
+    if (!raw || typeof raw !== 'object') return false;
+    const next = {
+      red: Number.isFinite(raw.red) ? raw.red : 0,
+      blue: Number.isFinite(raw.blue) ? raw.blue : 0,
+    };
+    if (next.red === teamKills.red && next.blue === teamKills.blue) return false;
+    teamKills = next;
+    return true;
+  }
+
+  function syncMyTeam() {
+    const me = players.find((p) => p.id === myId);
+    myTeam = me && (me.team === 'red' || me.team === 'blue') ? me.team : null;
   }
 
   // 对比本帧与上一帧的存活状态，一旦发现"从活着变成死亡"就在坦克当前位置生成一次爆炸特效；
@@ -591,7 +673,8 @@
   function detectDeaths(newTanks) {
     newTanks.forEach((t) => {
       if (prevAlive[t.id] && !t.alive) {
-        spawnExplosion(t.x, t.y, t.color);
+        // 团队模式用队伍色，普通模式用个人色。
+        spawnExplosion(t.x, t.y, displayColor(t));
       } else if (t.alive && prevShield[t.id] && !t.shield) {
         spawnShieldBreak(t.x, t.y);
       }
@@ -716,6 +799,8 @@
     players = [];
     spectators = [];
     spectating = false;
+    teamKills = { red: 0, blue: 0 };
+    myTeam = null;
     roomList = [];
     maze = null;
     tanks = [];
@@ -735,6 +820,7 @@
     lobbyCodeEl.textContent = '----';
     lobbyPlayersEl.replaceChildren();
     hudScores.replaceChildren();
+    hudScores.classList.remove('hud-team-mode');
     matchIntroPending = false;
     hideMatchIntro();
     spectatorBanner.classList.add('hidden');
@@ -744,35 +830,122 @@
   }
 
   // ---------- 大厅渲染 ----------
+  function teamCountsFromPlayers() {
+    let red = 0;
+    let blue = 0;
+    for (const p of players) {
+      if (p.team === 'red') red += 1;
+      else if (p.team === 'blue') blue += 1;
+    }
+    return { red, blue };
+  }
+
+  function makeLobbyPlayerRow(p) {
+    const row = document.createElement('div');
+    row.className = 'player-row';
+    const dot = document.createElement('span');
+    dot.className = 'player-dot';
+    // 团队模式下圆点用队伍色，一眼能看出队友/对手；其他模式保留个人色。
+    dot.style.background = isTeamMode() ? teamColor(p.team) : p.color;
+    const name = document.createElement('span');
+    name.className = 'player-name';
+    name.textContent = p.name;
+    row.appendChild(dot);
+    row.appendChild(name);
+    if (p.id === hostId) {
+      const tag = document.createElement('span');
+      tag.className = 'player-tag';
+      tag.textContent = '房主';
+      row.appendChild(tag);
+    }
+    if (isTeamMode()) {
+      const badge = document.createElement('span');
+      badge.className = `player-team-badge ${p.team === 'blue' ? 'blue' : 'red'}`;
+      badge.textContent = teamName(p.team);
+      row.appendChild(badge);
+
+      // 只有房主能换队；点击后等服务端 room_update 回来再刷新，不做本地乐观更新。
+      if (myId === hostId) {
+        const targetTeam = p.team === 'blue' ? 'red' : 'blue';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'player-team-btn';
+        btn.textContent = `换到${teamName(targetTeam)}`;
+        btn.addEventListener('click', () => {
+          send({ type: 'set_player_team', targetId: p.id, team: targetTeam });
+        });
+        row.appendChild(btn);
+      }
+    }
+    return row;
+  }
+
+  function renderLobbyPlayers() {
+    lobbyPlayersEl.innerHTML = '';
+    if (!isTeamMode()) {
+      players.forEach((p) => lobbyPlayersEl.appendChild(makeLobbyPlayerRow(p)));
+      return;
+    }
+
+    // 团队模式按红/蓝分组显示，队伍人数直接写在组标题右侧。
+    const groups = TEAM_KEYS.map((key) => ({ key, list: players.filter((p) => p.team === key) }));
+    const unassigned = players.filter((p) => !TEAM_META[p.team]);
+    if (unassigned.length > 0) groups.push({ key: null, list: unassigned });
+
+    groups.forEach(({ key, list }) => {
+      const section = document.createElement('div');
+      section.className = 'lobby-team-section';
+      const head = document.createElement('div');
+      head.className = 'lobby-team-head';
+      const label = document.createElement('span');
+      label.textContent = key ? teamName(key) : '未分队';
+      if (key) label.style.color = teamColor(key);
+      const count = document.createElement('span');
+      count.className = 'lobby-team-count';
+      count.textContent = `${list.length} 人`;
+      head.appendChild(label);
+      head.appendChild(count);
+      section.appendChild(head);
+      list.forEach((p) => section.appendChild(makeLobbyPlayerRow(p)));
+      lobbyPlayersEl.appendChild(section);
+    });
+  }
+
+  function renderTeamSetting() {
+    teamGroupEl.classList.toggle('hidden', !isTeamMode());
+    if (!isTeamMode()) return;
+
+    const counts = teamCountsFromPlayers();
+    teamSummaryEl.textContent = `红队 ${counts.red} 人 · 蓝队 ${counts.blue} 人`;
+    let warning = '';
+    if (counts.red === 0 || counts.blue === 0) warning = '两队都需要至少 1 名玩家才能开始';
+    else if (counts.red !== counts.blue) warning = '两队人数不等，仍可开始';
+    teamWarningEl.textContent = warning;
+    teamWarningEl.classList.toggle('hidden', !warning);
+    btnShuffleTeams.disabled = myId !== hostId || players.length < 2;
+  }
+
   function renderLobby() {
     lobbyNameEl.textContent = roomName || '未命名房间';
     lobbyNameEl.title = lobbyNameEl.textContent;
     lobbyCodeEl.textContent = roomCode || '----';
-    lobbyPlayersEl.innerHTML = '';
-    players.forEach((p) => {
-      const row = document.createElement('div');
-      row.className = 'player-row';
-      const dot = document.createElement('span');
-      dot.className = 'player-dot';
-      dot.style.background = p.color;
-      const name = document.createElement('span');
-      name.className = 'player-name';
-      name.textContent = p.name;
-      row.appendChild(dot);
-      row.appendChild(name);
-      if (p.id === hostId) {
-        const tag = document.createElement('span');
-        tag.className = 'player-tag';
-        tag.textContent = '房主';
-        row.appendChild(tag);
-      }
-      lobbyPlayersEl.appendChild(row);
-    });
+    renderLobbyPlayers();
 
     const amHost = myId === hostId;
+    const counts = teamCountsFromPlayers();
     if (amHost) {
-      btnStart.disabled = players.length < 2;
-      btnStart.textContent = players.length < 2 ? '等待玩家加入…' : `开始游戏（${players.length}人）`;
+      if (players.length < 2) {
+        btnStart.disabled = true;
+        btnStart.textContent = '等待玩家加入…';
+      } else if (isTeamMode() && (counts.red === 0 || counts.blue === 0)) {
+        btnStart.disabled = true;
+        btnStart.textContent = '等待两队都有玩家…';
+      } else {
+        btnStart.disabled = false;
+        btnStart.textContent = isTeamMode()
+          ? `开始游戏（红 ${counts.red} · 蓝 ${counts.blue}）`
+          : `开始游戏（${players.length}人）`;
+      }
     } else {
       btnStart.disabled = true;
       btnStart.textContent = '等待房主开始…';
@@ -783,6 +956,7 @@
     renderHpSetting();
     renderKillTargetSetting();
     renderWinScoreSetting();
+    renderTeamSetting();
   }
 
   // 大厅右侧的地图大小选择：房主可点，其他玩家只能看到当前档位（按钮禁用，保持只读）。
@@ -819,7 +993,7 @@
   }
 
   // ---------- 游戏模式 ----------
-  // 大厅右侧的模式选择：大乱斗 / 经典模式。和地图/血量一样只做只读渲染，
+  // 大厅右侧的模式选择：大乱斗 / 团队模式 / 经典模式。和地图/血量一样只做只读渲染，
   // 点击后等服务端 room_update 回来再改高亮，保证所有人看到同一份权威状态。
   function renderModePicker() {
     const amHost = myId === hostId;
@@ -850,14 +1024,18 @@
       modePickerEl.appendChild(btn);
     });
 
-    modeDescEl.textContent = mode === 'brawl'
-      ? `阵亡后 ${respawnDelay} 秒复活，先达到 ${killTarget} 次击杀者获胜。`
-      : `阵亡后本回合出局，先赢 ${winScore} 回合者获胜。`;
-    killTargetGroup.classList.toggle('hidden', mode !== 'brawl');
+    if (mode === 'brawl') {
+      modeDescEl.textContent = `阵亡后 ${respawnDelay} 秒复活，先达到 ${killTarget} 次击杀者获胜。`;
+    } else if (mode === 'team') {
+      modeDescEl.textContent = `红蓝两队对抗，阵亡后 ${respawnDelay} 秒复活；先达到 ${killTarget} 次团队击杀的队伍获胜，友军伤害关闭。`;
+    } else {
+      modeDescEl.textContent = `阵亡后本回合出局，先赢 ${winScore} 回合者获胜。`;
+    }
+    killTargetGroup.classList.toggle('hidden', mode !== 'brawl' && mode !== 'team');
     winScoreGroup.classList.toggle('hidden', mode !== 'classic');
   }
 
-  // ---------- 大乱斗击杀目标 ----------
+  // ---------- 大乱斗 / 团队模式击杀目标 ----------
   function clampKillTarget(v) {
     const n = Math.round(Number(v));
     if (!Number.isFinite(n)) return killTarget;
@@ -867,14 +1045,16 @@
   function renderKillTargetSetting() {
     const amHost = myId === hostId;
     if (document.activeElement !== killTargetInputEl) killTargetInputEl.value = String(killTarget);
-    const disabled = !amHost || mode !== 'brawl';
+    // 团队模式下同一个输入框表示"队伍总击杀目标"，标题跟着模式切换。
+    killTargetLabelEl.textContent = isTeamMode() ? '团队击杀目标' : '击杀目标';
+    const disabled = !amHost || (mode !== 'brawl' && mode !== 'team');
     killTargetInputEl.disabled = disabled;
     btnKillsMinus.disabled = disabled;
     btnKillsPlus.disabled = disabled;
   }
 
   function requestKillTarget(value) {
-    if (mode !== 'brawl') return;
+    if (mode !== 'brawl' && mode !== 'team') return;
     const next = clampKillTarget(value);
     killTargetInputEl.value = String(next);
     if (next !== killTarget) send({ type: 'set_kill_target', kills: next });
@@ -966,6 +1146,7 @@
       const old = oldById.get(t.id);
       return {
         id: t.id, name: t.name, color: t.color,
+        team: t.team || null,
         score: typeof t.score === 'number' ? t.score : (old ? old.score : 0),
         connected: true,
       };
@@ -1006,10 +1187,14 @@
     clearMatchIntroTimers();
     matchIntroEl.classList.remove('hidden', 'leaving');
     // 先让 live region 可见再写文案，读屏才会把这次公告读出来
-    matchIntroModeEl.textContent = mode === 'brawl' ? '大乱斗' : '经典模式';
-    matchIntroGoalEl.textContent = mode === 'brawl'
-      ? `先达到 ${killTarget} 次击杀`
-      : `先赢 ${winScore} 回合`;
+    matchIntroModeEl.textContent = modeName(mode);
+    if (mode === 'brawl') {
+      matchIntroGoalEl.textContent = `先达到 ${killTarget} 次击杀`;
+    } else if (mode === 'team') {
+      matchIntroGoalEl.textContent = `红蓝对抗 · 先达到 ${killTarget} 次团队击杀`;
+    } else {
+      matchIntroGoalEl.textContent = `先赢 ${winScore} 回合`;
+    }
     // 强制回流：从 display:none 切出来的同一帧直接加 .show 不会触发过渡
     void matchIntroEl.offsetWidth;
     matchIntroEl.classList.add('show');
@@ -1038,7 +1223,7 @@
   // 自己阵亡时在画布上显示复活倒计时；复活、观战、经典模式都自动隐藏。
   function updateRespawnBanner() {
     const self = tanks.find((t) => t.id === myId);
-    const showing = mode === 'brawl' && !spectating && self && !self.alive && self.respawn > 0;
+    const showing = hasRespawn() && !spectating && self && !self.alive && self.respawn > 0;
     if (!showing) {
       respawnBanner.classList.add('hidden');
       return;
@@ -1052,51 +1237,119 @@
     if (spectating && isTouchDevice) touchControls.classList.add('hidden');
   }
 
+  function makeHudPlayerItem(p) {
+    const item = document.createElement('div');
+    item.className = 'hud-item';
+    item.id = 'hud-' + p.id;
+    const dot = document.createElement('span');
+    dot.className = 'hud-dot';
+    // 团队模式下 HUD 圆点也用队伍色，和坦克车身保持一致。
+    dot.style.background = isTeamMode() ? teamColor(p.team) : p.color;
+    const label = document.createElement('span');
+    label.className = 'hud-label';
+    label.textContent = `${p.name} · ${p.score}`;
+    const hp = document.createElement('span');
+    hp.className = 'hud-hp';
+    hp.id = 'hud-hp-' + p.id;
+    hp.appendChild(makeHeartIcon());
+    const hpText = document.createElement('span');
+    hpText.className = 'hud-hp-text';
+    // 刚开局还没收到 state 时先按满血显示，收到第一帧后就会被真实血量覆盖
+    hpText.textContent = `${lastHp[p.id] ?? maxHp}/${maxHp}`;
+    hp.appendChild(hpText);
+    item.appendChild(dot);
+    item.appendChild(label);
+    item.appendChild(hp);
+    return item;
+  }
+
+  function makeHudSpectatorItem(s) {
+    const item = document.createElement('div');
+    item.className = 'hud-item hud-item-spectator';
+    item.id = 'hud-' + s.id;
+    const dot = document.createElement('span');
+    dot.className = 'hud-dot hud-dot-spectator';
+    const label = document.createElement('span');
+    label.className = 'hud-label';
+    label.textContent = s.name;
+    const tag = document.createElement('span');
+    tag.className = 'hud-spectator-tag';
+    tag.textContent = '观战';
+    item.appendChild(dot);
+    item.appendChild(label);
+    item.appendChild(tag);
+    return item;
+  }
+
+  // 团队模式 HUD：红蓝两块面板，标题显示"队伍总击杀 / 目标"，下面挂队员。
+  function renderTeamHud() {
+    const groups = TEAM_KEYS.map((key) => ({
+      key,
+      list: players.filter((p) => p.team === key),
+    }));
+    // 理论上开赛后不会出现未分队的人；兜底显示，避免有人从 HUD 里消失。
+    const unassigned = players.filter((p) => !TEAM_META[p.team]);
+    if (unassigned.length > 0) groups.push({ key: null, list: unassigned });
+
+    groups.forEach(({ key, list }) => {
+      const panel = document.createElement('div');
+      panel.className = 'hud-team' + (key ? ` team-${key}` : '');
+      if (key) panel.dataset.team = key;
+
+      const head = document.createElement('div');
+      head.className = 'hud-team-head';
+      // 队伍名和「我方」标签放在同一个左侧分组里，标签才会紧跟在队名后面，
+      // 而不是被右侧比分挤到中间。
+      const title = document.createElement('span');
+      title.className = 'hud-team-title';
+      const name = document.createElement('span');
+      name.className = 'hud-team-name';
+      name.textContent = key ? teamName(key) : '未分队';
+      if (key) name.style.color = teamColor(key);
+      title.appendChild(name);
+      if (key && key === myTeam) {
+        const selfTag = document.createElement('span');
+        selfTag.className = 'hud-team-self-tag';
+        selfTag.textContent = '我方';
+        title.appendChild(selfTag);
+      }
+
+      const score = document.createElement('span');
+      score.className = 'hud-team-score';
+      score.textContent = key ? `${teamKills[key] ?? 0} / ${killTarget}` : '';
+      head.appendChild(title);
+      head.appendChild(score);
+
+      const members = document.createElement('div');
+      members.className = 'hud-team-members';
+      list.forEach((p) => members.appendChild(makeHudPlayerItem(p)));
+      panel.appendChild(head);
+      panel.appendChild(members);
+      hudScores.appendChild(panel);
+    });
+  }
+
   function renderHud() {
     hudScores.innerHTML = '';
-    players.forEach((p) => {
-      const item = document.createElement('div');
-      item.className = 'hud-item';
-      item.id = 'hud-' + p.id;
-      const dot = document.createElement('span');
-      dot.className = 'hud-dot';
-      dot.style.background = p.color;
-      const label = document.createElement('span');
-      label.className = 'hud-label';
-      label.textContent = `${p.name} · ${p.score}`;
-      const hp = document.createElement('span');
-      hp.className = 'hud-hp';
-      hp.id = 'hud-hp-' + p.id;
-      hp.appendChild(makeHeartIcon());
-      const hpText = document.createElement('span');
-      hpText.className = 'hud-hp-text';
-      // 刚开局还没收到 state 时先按满血显示，收到第一帧后就会被真实血量覆盖
-      hpText.textContent = `${lastHp[p.id] ?? maxHp}/${maxHp}`;
-      hp.appendChild(hpText);
-      item.appendChild(dot);
-      item.appendChild(label);
-      item.appendChild(hp);
-      hudScores.appendChild(item);
-    });
+    const teamMode = isTeamMode();
+    hudScores.classList.toggle('hud-team-mode', teamMode);
+
+    if (teamMode) {
+      renderTeamHud();
+    } else {
+      players.forEach((p) => hudScores.appendChild(makeHudPlayerItem(p)));
+    }
 
     // 观战者仍然出现在顶部，但不显示血量/分数，用虚线和「观战」徽章区分。
-    spectators.forEach((s) => {
-      const item = document.createElement('div');
-      item.className = 'hud-item hud-item-spectator';
-      item.id = 'hud-' + s.id;
-      const dot = document.createElement('span');
-      dot.className = 'hud-dot hud-dot-spectator';
-      const label = document.createElement('span');
-      label.className = 'hud-label';
-      label.textContent = s.name;
-      const tag = document.createElement('span');
-      tag.className = 'hud-spectator-tag';
-      tag.textContent = '观战';
-      item.appendChild(dot);
-      item.appendChild(label);
-      item.appendChild(tag);
-      hudScores.appendChild(item);
-    });
+    // 团队模式下单独占一行，避免混进某个队伍的成员区。
+    if (teamMode && spectators.length > 0) {
+      const wrap = document.createElement('div');
+      wrap.className = 'hud-spectators';
+      spectators.forEach((s) => wrap.appendChild(makeHudSpectatorItem(s)));
+      hudScores.appendChild(wrap);
+    } else {
+      spectators.forEach((s) => hudScores.appendChild(makeHudSpectatorItem(s)));
+    }
   }
   function renderHudFromTanks() {
     tanks.forEach((t) => {
@@ -1185,6 +1438,8 @@
     // 重生动画期间：服务端判定这辆坦克还没有实体，所以只画正在凝聚的车身，
     // 名字、血条、护盾环、出生保护环全部等实体出现后再画。
     const spawning = t.spawnAnim > 0;
+    // 团队模式统一用队伍色；普通模式保留每名玩家的个人颜色。
+    const bodyColor = displayColor(t);
 
     ctx.save();
     ctx.translate(t.x, t.y);
@@ -1208,7 +1463,7 @@
     }
 
     // 车身（最底层的方形履带车体）
-    ctx.fillStyle = t.color;
+    ctx.fillStyle = bodyColor;
     ctx.beginPath();
     ctx.roundRect(-15, -15, 30, 30, 6);
     ctx.fill();
@@ -1239,7 +1494,7 @@
     }
 
     // 炮塔圆盘（最上层，压住炮管根部，只露出伸出去的炮管）
-    ctx.fillStyle = t.color;
+    ctx.fillStyle = bodyColor;
     ctx.beginPath();
     ctx.arc(0, 0, 11, 0, Math.PI * 2);
     ctx.fill();
