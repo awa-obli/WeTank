@@ -60,14 +60,14 @@
   const captureTargetInputEl = document.getElementById('capture-input');
   const btnCaptureMinus = document.getElementById('btn-capture-minus');
   const btnCapturePlus = document.getElementById('btn-capture-plus');
+  const collectTargetGroup = document.getElementById('collect-target-group');
+  const collectTargetInputEl = document.getElementById('collect-input');
+  const btnCollectMinus = document.getElementById('btn-collect-minus');
+  const btnCollectPlus = document.getElementById('btn-collect-plus');
   const winScoreGroup = document.getElementById('win-score-group');
   const winScoreInputEl = document.getElementById('win-score-input');
   const btnWinMinus = document.getElementById('btn-win-minus');
   const btnWinPlus = document.getElementById('btn-win-plus');
-  const teamGroupEl = document.getElementById('team-group');
-  const teamSummaryEl = document.getElementById('team-summary');
-  const teamWarningEl = document.getElementById('team-warning');
-  const btnShuffleTeams = document.getElementById('btn-shuffle-teams');
   const btnStart = document.getElementById('btn-start');
   const btnLeaveLobby = document.getElementById('btn-leave-lobby');
 
@@ -118,20 +118,22 @@
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
   let mapType = 'maze'; // 房间级设置：maze/open/symmetric/scatter/random，以服务端广播为准
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
-  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ capture=占点 / team=团队 / classic=经典
+  let mode = 'brawl'; // 房间级设置：brawl=大乱斗 / collect=收集 / capture=占点 / team=团队 / classic=经典
   let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
   let captureTarget = 3; // 占点模式胜利所需占领次数，以服务端广播为准
+  let collectTarget = 10; // 收集模式胜利所需钻石数，以服务端广播为准
   let captureTime = 12; // 占点一次所需秒数，以服务端广播为准（仅用于文案）
   let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
   let teamKills = { red: 0, blue: 0 }; // 团队模式：红蓝两队总击杀，以 state / match_end 为准
   let myTeam = null; // 自己所在队伍（red / blue），非团队模式或观战时为 null
-  let respawnDelay = 10; // 大乱斗复活等待秒数，以服务端广播为准（仅用于文案）
   const MIN_HP = 1;
   const MAX_HP = 10;
   const MIN_KILLS = 5;
   const MAX_KILLS = 30;
   const MIN_CAPTURE_TARGET = 1;
   const MAX_CAPTURE_TARGET = 10;
+  const MIN_COLLECT_TARGET = 1;
+  const MAX_COLLECT_TARGET = 30;
   const MIN_WIN_SCORE = 1;
   const MAX_WIN_SCORE = 10;
   let maze = null;
@@ -139,6 +141,7 @@
   let tanks = [];
   let bullets = [];
   let items = []; // 场上道具：{id, type, x, y}
+  let diamonds = []; // 收集模式的钻石：{id, x, y}
   // 占点模式当前据点：{ id, x, y, radius, progress, ownerId, ownerColor, status }。
   // 其他模式为 null；x/y/radius 在换点时变化，progress 每帧同步。
   let capturePoint = null;
@@ -152,6 +155,9 @@
   let prevShield = {}; // id -> 上一帧是否有护盾，用来检测"护盾刚被打破"这一瞬间
   const ITEM_COLORS = { shield: '#3A86FF', speed: '#FFD60A', triple: '#E63946', homing: '#B565D8', invisible: '#8FBDB6', repair: '#2ECC71', laser: '#00E5FF', ammo: '#FF8C1A' };
   const ITEM_GLYPHS = { shield: '盾', speed: '速', triple: '三', homing: '追', invisible: '隐', repair: '修', laser: '光', ammo: '弹' };
+  // 收集模式的钻石颜色 / 绘制半径，绘制半径与服务端 DIAMOND_RADIUS 保持一致。
+  const DIAMOND_COLOR = '#4CC9F0';
+  const DIAMOND_ICON_RADIUS = 14;
   // 与服务端 MAP_PRESETS 一一对应：这里只用 key 发请求、用尺寸做展示文案，
   // 真正的行列数以服务端开局广播的 game_start 为准。
   const MAP_OPTIONS = [
@@ -169,16 +175,17 @@
     { key: 'random', name: '随机', desc: '每回合抽一种' },
   ];
   // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式按红蓝两队累计击杀，
-  // 占点模式排在团队模式下面，经典模式保留原有的淘汰制玩法。
+  // 占点模式排在团队模式下面，收集模式收集钻石，经典模式保留原有的淘汰制玩法。
   const MODE_OPTIONS = [
-    { key: 'brawl', name: '大乱斗', tagline: '10 秒复活 · 击杀定胜负' },
-    { key: 'team', name: '团队模式', tagline: '红蓝对抗 · 团队击杀定胜负' },
-    { key: 'capture', name: '占点模式', tagline: '10 秒复活 · 占点得分' },
-    { key: 'classic', name: '经典模式', tagline: '一条命 · 回合定胜负' },
+    { key: 'brawl', name: '大乱斗模式', tagline: '连续混战，抢击杀' },
+    { key: 'team', name: '团队模式', tagline: '红蓝分队，合力抢击杀' },
+    { key: 'capture', name: '占点模式', tagline: '抢占随机据点，站圈得分' },
+    { key: 'collect', name: '收集模式', tagline: '抢钻石，阵亡掉一半' },
+    { key: 'classic', name: '经典模式', tagline: '回合淘汰赛，活到最后' },
   ];
   function modeName(key) {
     const found = MODE_OPTIONS.find((m) => m.key === key);
-    return found ? found.name : '大乱斗';
+    return found ? found.name : '大乱斗模式';
   }
 
   // 与服务端 TEAMS 一一对应。服务端只下发队伍 key，名称/颜色在客户端统一映射，
@@ -203,9 +210,12 @@
   function isCaptureMode() {
     return mode === 'capture';
   }
-  // 大乱斗、占点模式和团队模式都有 10 秒复活；经典模式没有。
+  function isCollectMode() {
+    return mode === 'collect';
+  }
+  // 大乱斗、占点模式、收集模式和团队模式都有 10 秒复活；经典模式没有。
   function hasRespawn() {
-    return mode === 'brawl' || mode === 'capture' || mode === 'team';
+    return mode === 'brawl' || mode === 'capture' || mode === 'collect' || mode === 'team';
   }
   // 团队模式下坦克/爆炸统一使用队伍色；个人颜色只在非团队模式使用。
   function displayColor(t) {
@@ -414,9 +424,6 @@
   });
 
   btnStart.addEventListener('click', () => send({ type: 'start_game' }));
-  btnShuffleTeams.addEventListener('click', () => {
-    if (myId === hostId && isTeamMode()) send({ type: 'shuffle_teams' });
-  });
   btnLeaveLobby.addEventListener('click', () => {
     send({ type: 'leave_room' });
     resetAfterLeave();
@@ -538,6 +545,8 @@
         hitFlash = {};
         lastHp = {};
         items = [];
+        // 收集模式：开局钻石由 game_start 下发；其他模式为空数组。
+        diamonds = msg.diamonds || [];
         // 占点模式：开局据点由 game_start 下发；其他模式为 null。
         capturePoint = msg.point || null;
         pointCaptureFx = [];
@@ -594,6 +603,8 @@
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
+        // 收集模式的钻石每帧同步；其他模式为空数组。
+        diamonds = msg.diamonds || [];
         // 占点模式：每帧同步据点进度；id 变化说明旧据点被占领、换到新位置了，
         // 在新位置补一个短暂的白色扩散环，提醒玩家新据点在哪儿。
         const prevPointId = capturePoint ? capturePoint.id : null;
@@ -642,13 +653,25 @@
         break;
 
       case 'item_pickup':
-        // 维修包回血：在坦克上方飘一个绿色 +1；满血捡包时 heal 为 0，不飘字。
+        // 钻石：拾取后飘 +1；维修包回血：在坦克上方飘一个绿色 +1。
+        // 满血捡维修包时 heal 为 0，不飘字。
         (msg.pickups || []).forEach((p) => {
+          if (p.type === 'diamond') {
+            const tank = tanks.find((t) => t.id === p.playerId);
+            if (tank) spawnFloatText(tank.x, tank.y - 30, '+1 钻石', DIAMOND_COLOR);
+            return;
+          }
           if (p.type !== 'repair' || !p.heal) return;
           const tank = tanks.find((t) => t.id === p.playerId);
           if (tank) spawnFloatText(tank.x, tank.y - 30, '+1', '#06D6A0');
         });
         break;
+
+      case 'diamond_drop': {
+        // 收集模式阵亡掉落：在死亡位置飘一个 "-N 钻石"，钻石实体由随后的 state 同步。
+        spawnFloatText(msg.x, msg.y - 24, `-${msg.count} 钻石`, '#FF6B6B');
+        break;
+      }
 
       case 'point_captured': {
         // 占点完成：旧据点位置播放扩散环 + 飘字；紧接着的 state 会把据点换到新位置。
@@ -716,6 +739,12 @@
             ? `🏆 ${champion.name} 以 ${champion.score} 次占领赢得比赛！`
             : `🏆 ${nameOf(msg.winnerId)} 赢得比赛！`;
           overlaySub.textContent = '即将返回房间…';
+        } else if (mode === 'collect') {
+          const champion = players.find((p) => p.id === msg.winnerId);
+          overlayTitle.textContent = champion
+            ? `🏆 ${champion.name} 以 ${champion.score} 颗钻石赢得比赛！`
+            : `🏆 ${nameOf(msg.winnerId)} 赢得比赛！`;
+          overlaySub.textContent = '即将返回房间…';
         } else {
           overlayTitle.textContent = `🏆 ${nameOf(msg.winnerId)} 赢得整场比赛！`;
           overlaySub.textContent = '即将返回房间…';
@@ -738,17 +767,17 @@
   }
 
   // 房间级模式设置统一从服务端消息同步，避免 joined / room_update / game_start 各写一套。
-  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 capture / team 会被静默改成大乱斗。
+  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 collect / capture / team 会被静默改成大乱斗。
   function syncModeSettings(msg) {
-    if (msg.mode === 'brawl' || msg.mode === 'capture' || msg.mode === 'team' || msg.mode === 'classic') {
+    if (msg.mode === 'brawl' || msg.mode === 'collect' || msg.mode === 'capture' || msg.mode === 'team' || msg.mode === 'classic') {
       mode = msg.mode;
     } else {
       mode = 'brawl';
     }
     if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
     if (Number.isInteger(msg.captureTarget)) captureTarget = msg.captureTarget;
+    if (Number.isInteger(msg.collectTarget)) collectTarget = msg.collectTarget;
     if (Number.isInteger(msg.winScore)) winScore = msg.winScore;
-    if (Number.isFinite(msg.respawnDelay)) respawnDelay = msg.respawnDelay;
     if (Number.isFinite(msg.captureTime)) captureTime = msg.captureTime;
     // 只有消息里显式带了 point 才覆盖：match_end 等消息不带据点，不能把上一帧的据点清掉。
     if (msg.point !== undefined) capturePoint = msg.point || null;
@@ -910,6 +939,7 @@
     tanks = [];
     bullets = [];
     items = [];
+    diamonds = [];
     capturePoint = null;
     pointCaptureFx = [];
     explosions = [];
@@ -1017,20 +1047,6 @@
     });
   }
 
-  function renderTeamSetting() {
-    teamGroupEl.classList.toggle('hidden', !isTeamMode());
-    if (!isTeamMode()) return;
-
-    const counts = teamCountsFromPlayers();
-    teamSummaryEl.textContent = `红队 ${counts.red} 人 · 蓝队 ${counts.blue} 人`;
-    let warning = '';
-    if (counts.red === 0 || counts.blue === 0) warning = '两队都需要至少 1 名玩家才能开始';
-    else if (counts.red !== counts.blue) warning = '两队人数不等，仍可开始';
-    teamWarningEl.textContent = warning;
-    teamWarningEl.classList.toggle('hidden', !warning);
-    btnShuffleTeams.disabled = myId !== hostId || players.length < 2;
-  }
-
   function renderLobby() {
     lobbyNameEl.textContent = roomName || '未命名房间';
     lobbyNameEl.title = lobbyNameEl.textContent;
@@ -1063,8 +1079,8 @@
     renderHpSetting();
     renderKillTargetSetting();
     renderCaptureTargetSetting();
+    renderCollectTargetSetting();
     renderWinScoreSetting();
-    renderTeamSetting();
   }
 
   // 大厅右侧的地图类型选择：房主可点，其他玩家只能看到当前类型（按钮禁用，保持只读）。
@@ -1133,8 +1149,9 @@
   }
 
   // ---------- 游戏模式 ----------
-  // 大厅右侧的模式选择：大乱斗 / 团队模式 / 经典模式。和地图/血量一样只做只读渲染，
-  // 点击后等服务端 room_update 回来再改高亮，保证所有人看到同一份权威状态。
+  // 大厅右侧的模式选择：大乱斗模式 / 团队模式 / 占点模式 / 收集模式 / 经典模式。
+  // 和地图/血量一样只做只读渲染，点击后等服务端 room_update 回来再改高亮，
+  // 保证所有人看到同一份权威状态。
   function renderModePicker() {
     const amHost = myId === hostId;
     modePickerEl.innerHTML = '';
@@ -1165,13 +1182,15 @@
     });
 
     if (mode === 'brawl') {
-      modeDescEl.textContent = `阵亡后 ${respawnDelay} 秒复活，先达到 ${killTarget} 次击杀者获胜。`;
+      modeDescEl.textContent = `所有人连续混战，击毁后还能再上场；先拿到 ${killTarget} 次击杀的人获胜。`;
     } else if (mode === 'capture') {
-      modeDescEl.textContent = `阵亡后 ${respawnDelay} 秒复活；独自站圈 ${captureTime} 秒占领一次，先占 ${captureTarget} 次者获胜。`;
+      modeDescEl.textContent = `场上会刷新一个据点；独自站在圈内 ${captureTime} 秒即可占领一次，先占 ${captureTarget} 次的人获胜。`;
+    } else if (mode === 'collect') {
+      modeDescEl.textContent = `捡起场上的钻石来加分；阵亡会掉一半已收集的钻石，先收集 ${collectTarget} 颗的人获胜。`;
     } else if (mode === 'team') {
-      modeDescEl.textContent = `红蓝两队对抗，阵亡后 ${respawnDelay} 秒复活；先达到 ${killTarget} 次团队击杀的队伍获胜，友军伤害关闭。`;
+      modeDescEl.textContent = `红蓝两队分头混战，击毁后还能再上场；先拿到 ${killTarget} 次团队击杀的队伍获胜，队友之间不会误伤。`;
     } else {
-      modeDescEl.textContent = `阵亡后本回合出局，先赢 ${winScore} 回合者获胜。`;
+      modeDescEl.textContent = `每回合淘汰制，活到最后的人拿下一回合；先赢 ${winScore} 个回合的人获胜。`;
     }
     killTargetGroup.classList.toggle('hidden', mode !== 'brawl' && mode !== 'team');
     winScoreGroup.classList.toggle('hidden', mode !== 'classic');
@@ -1233,6 +1252,34 @@
   captureTargetInputEl.addEventListener('change', () => requestCaptureTarget(captureTargetInputEl.value));
   btnCaptureMinus.addEventListener('click', () => requestCaptureTarget(clampCaptureTarget(captureTargetInputEl.value) - 1));
   btnCapturePlus.addEventListener('click', () => requestCaptureTarget(clampCaptureTarget(captureTargetInputEl.value) + 1));
+
+  // ---------- 收集模式收集目标 ----------
+  function clampCollectTarget(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return collectTarget;
+    return clampNum(n, MIN_COLLECT_TARGET, MAX_COLLECT_TARGET);
+  }
+
+  function renderCollectTargetSetting() {
+    const amHost = myId === hostId;
+    collectTargetGroup.classList.toggle('hidden', mode !== 'collect');
+    if (document.activeElement !== collectTargetInputEl) collectTargetInputEl.value = String(collectTarget);
+    const disabled = !amHost || mode !== 'collect';
+    collectTargetInputEl.disabled = disabled;
+    btnCollectMinus.disabled = disabled;
+    btnCollectPlus.disabled = disabled;
+  }
+
+  function requestCollectTarget(value) {
+    if (mode !== 'collect') return;
+    const next = clampCollectTarget(value);
+    collectTargetInputEl.value = String(next);
+    if (next !== collectTarget) send({ type: 'set_collect_target', target: next });
+  }
+
+  collectTargetInputEl.addEventListener('change', () => requestCollectTarget(collectTargetInputEl.value));
+  btnCollectMinus.addEventListener('click', () => requestCollectTarget(clampCollectTarget(collectTargetInputEl.value) - 1));
+  btnCollectPlus.addEventListener('click', () => requestCollectTarget(clampCollectTarget(collectTargetInputEl.value) + 1));
 
   // ---------- 经典模式胜利分数 ----------
   function clampWinScore(v) {
@@ -1362,6 +1409,8 @@
       matchIntroGoalEl.textContent = `先达到 ${killTarget} 次击杀`;
     } else if (mode === 'capture') {
       matchIntroGoalEl.textContent = `先占领 ${captureTarget} 次据点`;
+    } else if (mode === 'collect') {
+      matchIntroGoalEl.textContent = `先收集 ${collectTarget} 颗钻石`;
     } else if (mode === 'team') {
       matchIntroGoalEl.textContent = `红蓝对抗 · 先达到 ${killTarget} 次团队击杀`;
     } else {
@@ -2172,6 +2221,61 @@
     });
   }
 
+  // ---------- 收集模式的钻石 ----------
+  // 用简洁的切面宝石造型：平顶、宽肩、尖底，顶部一块亮面，不再用菱形轮廓。
+  // 钻石画在地板/迷宫之上、坦克之下；贴墙时被坦克挡住也不会影响拾取判定。
+  function drawDiamonds() {
+    if (!isCollectMode()) return;
+    const r = DIAMOND_ICON_RADIUS;
+    const topY = -r * 0.62;
+    const shoulderY = -r * 0.06;
+    const topHalf = r * 0.5;
+    const sideX = r * 0.9;
+    const bottomY = r * 0.9;
+
+    diamonds.forEach((d) => {
+      ctx.save();
+      ctx.translate(d.x, d.y);
+
+      // 宝石主体
+      ctx.beginPath();
+      ctx.moveTo(-topHalf, topY);
+      ctx.lineTo(topHalf, topY);
+      ctx.lineTo(sideX, shoulderY);
+      ctx.lineTo(0, bottomY);
+      ctx.lineTo(-sideX, shoulderY);
+      ctx.closePath();
+      ctx.fillStyle = DIAMOND_COLOR;
+      ctx.strokeStyle = '#06110F';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.fill();
+      ctx.stroke();
+
+      // 顶部切面：比主体亮一号，做出宝石的切割感
+      ctx.beginPath();
+      ctx.moveTo(-topHalf, topY);
+      ctx.lineTo(topHalf, topY);
+      ctx.lineTo(r * 0.28, -r * 0.16);
+      ctx.lineTo(-r * 0.28, -r * 0.16);
+      ctx.closePath();
+      ctx.fillStyle = '#A9E9FF';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(6, 17, 15, 0.45)';
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+
+      // 两道从顶部切面收到尖底的棱线
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.28, -r * 0.16);
+      ctx.lineTo(0, bottomY);
+      ctx.lineTo(r * 0.28, -r * 0.16);
+      ctx.stroke();
+
+      ctx.restore();
+    });
+  }
+
   // ---------- 激光路径预览 ----------
   // 只有自己手里有激光时，服务端才会在 ammo 消息里私发这条折线；
   // 用虚线画在坦克/子弹下面，发射前就能看到反弹后的整条路径。
@@ -2212,6 +2316,7 @@
     drawCapturePoint(); // 压在地板之上、迷宫墙之下：墙体挡住的那一截会被墙盖住
     drawMaze();
     drawItems();
+    drawDiamonds();
     drawLaserPreview();
     drawTrails(now);
     tanks.forEach((t) => drawTank(t, now));

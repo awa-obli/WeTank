@@ -168,12 +168,6 @@
             <div id="mode-picker" class="mode-picker" role="group" aria-label="游戏模式"></div>
             <p id="mode-desc" class="mode-desc"></p>
           </div>
-          <div id="team-group" class="settings-group hidden">
-            <span class="settings-label">队伍</span>
-            <p id="team-summary" class="team-summary"></p>
-            <p id="team-warning" class="team-warning hidden"></p>
-            <button id="btn-shuffle-teams" class="btn btn-ghost team-shuffle" type="button">重新分队</button>
-          </div>
           <div id="kill-target-group" class="settings-group hidden">
             <span id="kill-target-label" class="settings-label">击杀目标</span>
             <div class="hp-control">
@@ -188,6 +182,14 @@
               <button id="btn-capture-minus" class="hp-step" type="button" aria-label="减少占领目标">−</button>
               <input id="capture-input" class="hp-input" type="number" inputmode="numeric" min="1" max="10" step="1" value="3" autocomplete="off" aria-label="占领目标（1 到 10）" />
               <button id="btn-capture-plus" class="hp-step" type="button" aria-label="增加占领目标">＋</button>
+            </div>
+          </div>
+          <div id="collect-target-group" class="settings-group hidden">
+            <span class="settings-label">收集目标</span>
+            <div class="hp-control">
+              <button id="btn-collect-minus" class="hp-step" type="button" aria-label="减少收集目标">−</button>
+              <input id="collect-input" class="hp-input" type="number" inputmode="numeric" min="1" max="30" step="1" value="10" autocomplete="off" aria-label="收集目标（1 到 30）" />
+              <button id="btn-collect-plus" class="hp-step" type="button" aria-label="增加收集目标">＋</button>
             </div>
           </div>
           <div id="win-score-group" class="settings-group hidden">

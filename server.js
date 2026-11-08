@@ -98,11 +98,13 @@ const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
 // 先达到房间设置的击杀目标者获胜；team（团队模式）同样复活，但按红蓝两队累计击杀，
 // 先达到目标的队伍获胜；capture（占点模式）也沿用复活节奏，目标改为占据场上唯一的据点：
 // 单人站圈 12 秒占领一次得 1 分，据点随后随机换位，先达到房间设置的占领目标者获胜；
+// collect（收集模式）同样阵亡复活，目标是收集地图上的钻石，先达到收集目标者获胜；
 // classic（经典模式）保留原玩法：淘汰制回合计分。
 const MODES = {
-  brawl: { key: 'brawl', name: '大乱斗' },
+  brawl: { key: 'brawl', name: '大乱斗模式' },
   team: { key: 'team', name: '团队模式' },
   capture: { key: 'capture', name: '占点模式' },
+  collect: { key: 'collect', name: '收集模式' },
   classic: { key: 'classic', name: '经典模式' },
 };
 const DEFAULT_MODE = 'brawl';
@@ -119,9 +121,9 @@ function otherTeam(team) {
   return team === 'red' ? 'blue' : 'red';
 }
 
-// 大乱斗、占点模式、团队模式都是"连续复活、按目标定胜负"，只有经典模式没有复活机制。
+// 大乱斗、占点模式、收集模式、团队模式都是"连续复活、按目标定胜负"，只有经典模式没有复活机制。
 function hasRespawn(mode) {
-  return mode === 'brawl' || mode === 'capture' || mode === 'team';
+  return mode === 'brawl' || mode === 'capture' || mode === 'collect' || mode === 'team';
 }
 
 // 大乱斗 / 团队模式：复活等待时长（秒，固定）与击杀目标（房间级设置，房主可改）。
@@ -141,6 +143,18 @@ const MAX_CAPTURE_TARGET = 10;
 const DEFAULT_WIN_SCORE = 5;
 const MIN_WIN_SCORE = 1;
 const MAX_WIN_SCORE = 10;
+
+// ---------- 收集模式：钻石 ----------
+// 开局在场上放 2 颗钻石，之后每 10 秒自动补 1 颗，自动刷新上限 5 颗。
+// 阵亡会掉落已收集钻石的一半（向下取整），掉落的钻石不受自动刷新上限限制——
+// 它们会额外落在死亡位置附近，之后自动刷新会暂停，直到场上数量降回 5 颗以下。
+const DEFAULT_COLLECT_TARGET = 10;
+const MIN_COLLECT_TARGET = 1;
+const MAX_COLLECT_TARGET = 30;
+const COLLECT_INITIAL_DIAMONDS = 2;
+const COLLECT_DIAMONDS_ON_FIELD = 5;
+const COLLECT_DIAMOND_INTERVAL = 10; // 秒
+const DIAMOND_RADIUS = 14; // 拾取判定与绘制半径
 
 // ---------- 血量机制 ----------
 // 房间级设置：每回合开局把所有人血量补满，每发子弹固定造成 1 点伤害。
@@ -269,6 +283,11 @@ class Room {
     this.items = []; // 场上道具：{ id, type, x, y }
     this.nextItemId = 1;
     this.itemSpawnAcc = 0; // 距离上次刷新道具经过的秒数，累计到 ITEM_SPAWN_INTERVAL 就刷一个
+    // 收集模式专用：场上钻石 { id, x, y, cellR, cellC }，以及自动刷新计时。
+    // 钻石与普通道具分开存：它们不计入道具池，也不会被道具刷新逻辑当成占位。
+    this.diamonds = [];
+    this.nextDiamondId = 1;
+    this.diamondSpawnAcc = 0;
     // 地图类型/大小与初始血量都是房间级设置：房主在大厅里改，每回合开始时按它生成地图/补满血量。
     // mapLayout 记录本回合实际使用的布局：mapType 为 random 时它和 mapType 不同。
     this.mapType = DEFAULT_MAP_TYPE;
@@ -278,10 +297,12 @@ class Room {
     // 游戏模式与各模式的胜利目标同样是房间级设置，只在大厅可改：
     //   brawl   → killTarget（击杀数）
     //   capture → captureTarget（占领次数）
+    //   collect → collectTarget（收集钻石数）
     //   classic → winScore（回合胜场数）
     this.mode = DEFAULT_MODE;
     this.killTarget = DEFAULT_KILL_TARGET;
     this.captureTarget = DEFAULT_CAPTURE_TARGET;
+    this.collectTarget = DEFAULT_COLLECT_TARGET;
     this.winScore = DEFAULT_WIN_SCORE;
     // 占点模式当前据点：{ id, x, y, radius, progress, ownerId, ownerColor, status }。
     // 只有 capture 模式在 startRound 时生成；其他模式保持 null。
@@ -323,6 +344,7 @@ class Room {
       mode: this.mode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
+      collectTarget: this.collectTarget,
       winScore: this.winScore,
       captureTime: CAPTURE_TIME,
     });
@@ -359,6 +381,11 @@ class Room {
       ownerColor: p.ownerColor,
       status: p.status,
     };
+  }
+
+  // 钻石的公开快照：收集模式之外统一为空数组，客户端无需判断模式。
+  diamondList() {
+    return this.diamonds.map((d) => ({ id: d.id, x: d.x, y: d.y }));
   }
 
   memberCount() {
@@ -462,10 +489,13 @@ class Room {
       mode: this.mode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
+      collectTarget: this.collectTarget,
       winScore: this.winScore,
       // 占点模式：CAPTURE_TIME 用于大厅/开局公告文案，point 是本局当前的据点。
       captureTime: CAPTURE_TIME,
       point: this.pointMessage(),
+      // 收集模式的钻石：开局快照 / 观战补发都带上，客户端不用等第一帧 state。
+      diamonds: this.diamondList(),
       // 团队模式开局清零；非团队模式也带一个全 0 的对象，客户端可以无脑读取。
       teamKills: { ...this.teamKills },
       respawnDelay: BRAWL_RESPAWN_DELAY,
@@ -511,6 +541,8 @@ class Room {
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
       items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
+      // 收集模式的钻石；其他模式为空数组。
+      diamonds: this.diamondList(),
       // 占点模式的据点：进度、占领者、争夺/衰减状态；其他模式恒为 null。
       point: this.pointMessage(),
       // 团队总击杀：和每帧 state 一起下发，客户端 HUD 只在这个值变化时重建。
@@ -538,6 +570,9 @@ class Room {
     this.bullets = [];
     this.items = [];
     this.itemSpawnAcc = 0;
+    // 收集模式：每局重新摆 2 颗钻石，并清空上一局的自动刷新计时。
+    this.diamonds = [];
+    this.diamondSpawnAcc = 0;
     // 占点模式每局重新生成一个据点；其他模式没有据点。
     // 据点允许跨墙，圆心完全随机，只保留一个半径的边距让整个圆留在图内。
     this.point = null;
@@ -586,6 +621,11 @@ class Room {
       p.respawnRemaining = 0;
     });
 
+    // 收集模式：开局先摆 2 颗钻石。此时玩家位置已确定，生成时会避开坦克所在格。
+    if (this.mode === 'collect') {
+      for (let i = 0; i < COLLECT_INITIAL_DIAMONDS; i++) this.spawnDiamond();
+    }
+
     this.broadcast(this.gameStartMessage());
 
     if (!this.tickHandle) {
@@ -606,11 +646,117 @@ class Room {
     return point;
   }
 
+  // ---------- 收集模式：钻石 ----------
+  // 自动刷新：在随机空格心放一颗；没有空位时返回 null。
+  // 生成时避开普通道具、已有钻石和所有存活坦克所在格，避免一刷出来就被脚下的人白捡。
+  spawnDiamond() {
+    if (this.mode !== 'collect') return null;
+    const occupied = new Set();
+    for (const it of this.items) occupied.add(`${it.cellR},${it.cellC}`);
+    for (const d of this.diamonds) occupied.add(`${d.cellR},${d.cellC}`);
+    for (const p of this.players.values()) {
+      if (!p.alive) continue;
+      const c = clamp(Math.floor(p.x / CELL), 0, this.cols - 1);
+      const r = clamp(Math.floor(p.y / CELL), 0, this.rows - 1);
+      occupied.add(`${r},${c}`);
+    }
+    const cell = pickRandomItemCell(occupied, this.cols, this.rows);
+    if (!cell) return null;
+    const diamond = {
+      id: this.nextDiamondId++,
+      x: cell.x,
+      y: cell.y,
+      cellR: cell.r,
+      cellC: cell.c,
+    };
+    this.diamonds.push(diamond);
+    return diamond;
+  }
+
+  // 死亡掉落用：在死亡点附近找一个不压墙、不贴边界的位置。
+  // 坦克死亡位置本身一定是空地，所以随机偏移都失败时直接退回死亡点。
+  isDiamondSpotClear(x, y) {
+    if (x < DIAMOND_RADIUS || x > this.worldW - DIAMOND_RADIUS
+      || y < DIAMOND_RADIUS || y > this.worldH - DIAMOND_RADIUS) return false;
+    for (const rect of this.maze.rects) {
+      if (physics.circleRectOverlap(x, y, DIAMOND_RADIUS, rect)) return false;
+    }
+    return true;
+  }
+
+  // index / total 用来把同一名玩家掉落的几颗钻石沿圆周分散开，避免全部叠在一个点。
+  spawnDiamondNear(x, y, index = 0, total = 1) {
+    const baseAngle = (Math.PI * 2 * index) / Math.max(1, total);
+    let sx = x;
+    let sy = y;
+    for (let i = 0; i < 10; i++) {
+      const angle = baseAngle + (i / 10) * Math.PI * 2 + Math.random() * 0.45;
+      const dist = 18 + Math.random() * 22;
+      const nx = x + Math.cos(angle) * dist;
+      const ny = y + Math.sin(angle) * dist;
+      const tooClose = this.diamonds.some((d) => {
+        const dx = d.x - nx;
+        const dy = d.y - ny;
+        return dx * dx + dy * dy < (DIAMOND_RADIUS * 2) * (DIAMOND_RADIUS * 2);
+      }) || this.items.some((it) => {
+        const dx = it.x - nx;
+        const dy = it.y - ny;
+        return dx * dx + dy * dy < (DIAMOND_RADIUS + ITEM_RADIUS) * (DIAMOND_RADIUS + ITEM_RADIUS);
+      });
+      if (!tooClose && this.isDiamondSpotClear(nx, ny)) {
+        sx = nx;
+        sy = ny;
+        break;
+      }
+    }
+    const diamond = {
+      id: this.nextDiamondId++,
+      x: sx,
+      y: sy,
+      cellR: clamp(Math.floor(sx / CELL), 0, this.cols - 1),
+      cellC: clamp(Math.floor(sy / CELL), 0, this.rows - 1),
+    };
+    this.diamonds.push(diamond);
+    return diamond;
+  }
+
+  // 阵亡掉落：已收集钻石的一半（向下取整，1 颗时不掉落），落在死亡点附近。
+  // 掉落数量不受自动刷新上限限制；自动刷新会在场上数量降回 5 颗以下后继续。
+  dropDiamonds(p) {
+    if (this.mode !== 'collect' || !p || p.score <= 0) return 0;
+    const count = Math.floor(p.score / 2);
+    if (count <= 0) return 0;
+    p.score -= count;
+    for (let i = 0; i < count; i++) this.spawnDiamondNear(p.x, p.y, i, count);
+    // 让客户端在死亡位置飘一个 "-N 钻石"，并和随后到达的 state 保持同一份分数。
+    this.broadcast({
+      type: 'diamond_drop',
+      playerId: p.id,
+      count,
+      score: p.score,
+      x: p.x,
+      y: p.y,
+    });
+    return count;
+  }
+
+  // 每 10 秒自动补 1 颗，最多补到 5 颗。到上限后计时照常走，但不会生成。
+  updateDiamondSpawns() {
+    if (this.mode !== 'collect' || this.state !== 'playing') return;
+    this.diamondSpawnAcc += DT;
+    while (this.diamondSpawnAcc >= COLLECT_DIAMOND_INTERVAL - 1e-6) {
+      this.diamondSpawnAcc -= COLLECT_DIAMOND_INTERVAL;
+      if (this.diamonds.length < COLLECT_DIAMONDS_ON_FIELD) this.spawnDiamond();
+    }
+  }
+
   tick() {
     if (this.state !== 'playing' && this.state !== 'round_pending') return;
     // 大乱斗 / 团队模式：先推进阵亡玩家的复活倒计时，到点的人在这一帧重新上场；
     // 随后再统一计算存活名单，复活者会带着出生动画进入下面的移动/碰撞逻辑。
     if (hasRespawn(this.mode) && this.state === 'playing') this.updateRespawns();
+    // 收集模式：每 10 秒自动补 1 颗钻石（上限 5 颗），与复活计时互不影响。
+    if (this.mode === 'collect' && this.state === 'playing') this.updateDiamondSpawns();
     const alivePlayers = [...this.players.values()].filter((p) => p.alive);
     // 本帧开火产生的激光先记下来，等坦克移动/推挤完成、拿到最终位置后再统一求路径。
     const pendingLasers = [];
@@ -782,6 +928,8 @@ class Room {
     if (this.itemSpawnAcc >= ITEM_SPAWN_INTERVAL) {
       this.itemSpawnAcc -= ITEM_SPAWN_INTERVAL;
       const occupied = new Set(this.items.map((it) => `${it.cellR},${it.cellC}`));
+      // 收集模式下道具不要刷在钻石同一格，避免两个可拾取物叠在一起。
+      for (const d of this.diamonds) occupied.add(`${d.cellR},${d.cellC}`);
       const cell = pickRandomItemCell(occupied, this.cols, this.rows);
       if (cell) {
         // 1 点血模式下一发就淘汰，血量不是 0 就是满的，维修包永远回不了血，
@@ -840,6 +988,38 @@ class Room {
       }
       this.items = remainingItems;
     }
+
+    // --- 钻石拾取 ---
+    // 与普通道具一样，碰撞即拾取、立刻加分。放在子弹结算之前：
+    // 本帧刚捡到的钻石先计入分数，随后被打死时再按新的分数掉落一半。
+    if (this.mode === 'collect' && this.diamonds.length > 0) {
+      const remainingDiamonds = [];
+      for (const d of this.diamonds) {
+        let takenBy = null;
+        for (const p of solidPlayers) {
+          const dx = p.x - d.x;
+          const dy = p.y - d.y;
+          if (dx * dx + dy * dy < (TANK_RADIUS + DIAMOND_RADIUS) * (TANK_RADIUS + DIAMOND_RADIUS)) {
+            takenBy = p;
+            break;
+          }
+        }
+        if (takenBy) {
+          takenBy.score += 1;
+          pickups.push({
+            playerId: takenBy.id,
+            type: 'diamond',
+            x: d.x,
+            y: d.y,
+            score: takenBy.score,
+          });
+        } else {
+          remainingDiamonds.push(d);
+        }
+      }
+      this.diamonds = remainingDiamonds;
+    }
+
     if (pickups.length > 0) {
       this.broadcast({ type: 'item_pickup', pickups });
     }
@@ -1027,6 +1207,20 @@ class Room {
       }
     }
 
+    // --- 收集模式胜负判断 ---
+    // 以收集到的钻石数为胜利条件：任意玩家达到房间设置的收集目标就结束整场。
+    // 同样放在 state 广播之后，保证客户端先看到最后一颗钻石的拾取画面，再收到 match_end。
+    if (this.mode === 'collect') {
+      let champion = null;
+      for (const p of this.players.values()) {
+        if (p.score >= this.collectTarget && (!champion || p.score > champion.score)) champion = p;
+      }
+      if (champion) {
+        this.advanceAfterRound(champion);
+        return;
+      }
+    }
+
     // --- 团队模式胜负判断 ---
     // 任意一队总击杀达到目标即结束整场。同一 tick 两队同时达标时先比总击杀，
     // 完全相同则判平局（返回大厅，不记胜者）。
@@ -1096,9 +1290,16 @@ class Room {
       .filter((o) => o !== p && o.alive)
       .map((o) => ({ x: o.x, y: o.y }));
     // 占点模式：复活点不要落在当前据点圈内，避免一复活就开始白拿进度。
-    const avoidZones = this.point
-      ? [{ x: this.point.x, y: this.point.y, r: this.point.radius + TANK_RADIUS + 4 }]
-      : [];
+    // 收集模式：复活点也不要直接踩在钻石上，否则一落地就白捡。
+    const avoidZones = [];
+    if (this.point) {
+      avoidZones.push({ x: this.point.x, y: this.point.y, r: this.point.radius + TANK_RADIUS + 4 });
+    }
+    if (this.mode === 'collect') {
+      for (const d of this.diamonds) {
+        avoidZones.push({ x: d.x, y: d.y, r: TANK_RADIUS + DIAMOND_RADIUS + 4 });
+      }
+    }
     const spot = pickRespawnCell({
       cols: this.cols,
       rows: this.rows,
@@ -1153,8 +1354,11 @@ class Room {
     if (target.hp <= 0) {
       target.alive = false;
       target.lastHitBy = ownerId;
+      // 收集模式：阵亡掉落已收集钻石的一半。先扣分、再进入复活倒计时，
+      // 这样死亡瞬间的 state / diamond_drop 里看到的就是扣完后的分数。
+      if (this.mode === 'collect') this.dropDiamonds(target);
       if (hasRespawn(this.mode)) {
-        // 大乱斗 / 占点 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，
+        // 大乱斗 / 占点 / 收集 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，
         // 由 updateRespawns 放回场上。
         target.respawnRemaining = BRAWL_RESPAWN_DELAY;
         // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
@@ -1294,6 +1498,7 @@ class Room {
       mode: this.mode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
+      collectTarget: this.collectTarget,
       winScore: this.winScore,
     });
     this.broadcastRoom();
@@ -1317,6 +1522,7 @@ class Room {
       mode: this.mode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
+      collectTarget: this.collectTarget,
       winScore: this.winScore,
     });
     this.broadcastRoom();
@@ -1339,6 +1545,7 @@ class Room {
         mode: this.mode,
         killTarget: this.killTarget,
         captureTarget: this.captureTarget,
+        collectTarget: this.collectTarget,
         winScore: this.winScore,
       });
       this.broadcastRoom();
@@ -1490,7 +1697,7 @@ wss.on('connection', (ws) => {
         spectating: false, players: room.playerList(), spectators: [],
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
         mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
-        winScore: room.winScore, captureTime: CAPTURE_TIME,
+        collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       broadcastRoomList();
@@ -1527,7 +1734,7 @@ wss.on('connection', (ws) => {
           spectating: true, players: room.playerList(), spectators: room.spectatorList(),
           mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
           mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
-          winScore: room.winScore, captureTime: CAPTURE_TIME,
+          collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
           respawnDelay: BRAWL_RESPAWN_DELAY,
         }));
         // 补发当前迷宫和状态，观战者不用等下一帧也能立即看到完整对局。
@@ -1550,7 +1757,7 @@ wss.on('connection', (ws) => {
         spectating: false, players: room.playerList(), spectators: room.spectatorList(),
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
         mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
-        winScore: room.winScore, captureTime: CAPTURE_TIME,
+        collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       room.broadcastRoom();
@@ -1668,7 +1875,7 @@ wss.on('connection', (ws) => {
         return;
       }
       if (currentRoom.mode !== 'brawl' && currentRoom.mode !== 'team') {
-        ws.send(JSON.stringify({ type: 'error', message: '只有大乱斗/团队模式可以设置击杀目标' }));
+        ws.send(JSON.stringify({ type: 'error', message: '只有大乱斗模式/团队模式可以设置击杀目标' }));
         return;
       }
       const kills = parseInteger(msg.kills);
@@ -1704,6 +1911,32 @@ wss.on('connection', (ws) => {
       }
       if (currentRoom.captureTarget !== target) {
         currentRoom.captureTarget = target;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_collect_target') {
+      // 收集目标与占领目标一样是房主专属、只在大厅可改。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改收集目标' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改收集目标' }));
+        return;
+      }
+      if (currentRoom.mode !== 'collect') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有收集模式可以设置收集目标' }));
+        return;
+      }
+      const target = parseInteger(msg.target);
+      if (!Number.isInteger(target) || target < MIN_COLLECT_TARGET || target > MAX_COLLECT_TARGET) {
+        ws.send(JSON.stringify({ type: 'error', message: `收集目标必须是 ${MIN_COLLECT_TARGET}–${MAX_COLLECT_TARGET} 之间的整数` }));
+        return;
+      }
+      if (currentRoom.collectTarget !== target) {
+        currentRoom.collectTarget = target;
         currentRoom.broadcastRoom();
       }
       return;
@@ -1920,6 +2153,13 @@ module.exports = {
   DEFAULT_CAPTURE_TARGET,
   MIN_CAPTURE_TARGET,
   MAX_CAPTURE_TARGET,
+  DEFAULT_COLLECT_TARGET,
+  MIN_COLLECT_TARGET,
+  MAX_COLLECT_TARGET,
+  COLLECT_INITIAL_DIAMONDS,
+  COLLECT_DIAMONDS_ON_FIELD,
+  COLLECT_DIAMOND_INTERVAL,
+  DIAMOND_RADIUS,
   CAPTURE_RADIUS,
   CAPTURE_TIME,
   DECAY_EMPTY_TIME,

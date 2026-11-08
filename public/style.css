@@ -443,11 +443,6 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .player-team-btn:hover { border-color: var(--green); }
 .player-team-btn:active { transform: translate(1px, 1px); }
 
-/* 团队设置区：人数摘要 + 不等提示 + 重新分队 */
-.team-summary { margin: 0 0 6px; color: var(--text); font-size: 13px; font-weight: 700; }
-.team-warning { margin: 0 0 8px; color: var(--yellow); font-size: 11px; font-weight: 600; line-height: 1.4; }
-.team-shuffle { margin-top: 4px; padding: 8px 10px; font-size: 13px; box-shadow: none; }
-
 /* 房间设置面板：与玩家列表同一套描边/投影风格 */
 .settings-panel {
   background: var(--panel);
@@ -456,11 +451,20 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   box-shadow: 6px 6px 0 var(--ink);
   padding: 18px;
 }
-.settings-title { font-size: 16px; margin-bottom: 4px; }
-.settings-hint { color: var(--muted); font-size: 12px; font-weight: 600; margin: 0 0 16px; }
+.settings-title { font-size: 18px; margin-bottom: 4px; }
+.settings-hint { color: var(--muted); font-size: 12px; font-weight: 600; margin: 0 0 18px; }
+/* 设置项标题：亮色加粗 + 左侧黄色竖条，和下方的灰色说明文字形成明确层级 */
 .settings-label {
-  display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px;
-  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  display: flex; align-items: center; gap: 7px;
+  margin: 0 0 8px;
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-size: 14px; font-weight: 700; color: var(--text);
+  letter-spacing: .02em;
+}
+.settings-label::before {
+  content: ''; flex-shrink: 0;
+  width: 4px; height: 14px; border-radius: 2px;
+  background: var(--yellow);
 }
 
 /* 地图大小：三档按钮竖排，选中档黄色高亮；非房主看到的按钮是禁用态（只读）。 */
@@ -528,7 +532,15 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .mode-option:disabled { cursor: not-allowed; }
 .mode-option:disabled:not(.active) { opacity: .45; }
 .mode-option:disabled.active { opacity: .85; }
-.mode-desc { margin: 8px 0 0; color: var(--muted); font-size: 11px; font-weight: 600; line-height: 1.45; }
+.mode-desc {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  background: rgba(6, 17, 15, .28);
+  border-left: 2px solid rgba(143, 189, 182, .45);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted);
+  font-size: 11px; font-weight: 600; line-height: 1.5;
+}
 
 /* 初始血量：数字输入 + 两侧 −/+ 微调；非房主整组禁用，只读显示当前值 */
 .settings-group + .settings-group { margin-top: 18px; }
