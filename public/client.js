@@ -56,6 +56,10 @@
   const killTargetInputEl = document.getElementById('kills-input');
   const btnKillsMinus = document.getElementById('btn-kills-minus');
   const btnKillsPlus = document.getElementById('btn-kills-plus');
+  const captureTargetGroup = document.getElementById('capture-target-group');
+  const captureTargetInputEl = document.getElementById('capture-input');
+  const btnCaptureMinus = document.getElementById('btn-capture-minus');
+  const btnCapturePlus = document.getElementById('btn-capture-plus');
   const winScoreGroup = document.getElementById('win-score-group');
   const winScoreInputEl = document.getElementById('win-score-input');
   const btnWinMinus = document.getElementById('btn-win-minus');
@@ -114,8 +118,10 @@
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
   let mapType = 'maze'; // 房间级设置：maze/open/symmetric/scatter/random，以服务端广播为准
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
-  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ team=团队模式 / classic=经典模式
+  let mode = 'brawl'; // 房间级设置：brawl=大乱斗（默认）/ capture=占点 / team=团队 / classic=经典
   let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
+  let captureTarget = 3; // 占点模式胜利所需占领次数，以服务端广播为准
+  let captureTime = 12; // 占点一次所需秒数，以服务端广播为准（仅用于文案）
   let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
   let teamKills = { red: 0, blue: 0 }; // 团队模式：红蓝两队总击杀，以 state / match_end 为准
   let myTeam = null; // 自己所在队伍（red / blue），非团队模式或观战时为 null
@@ -124,6 +130,8 @@
   const MAX_HP = 10;
   const MIN_KILLS = 5;
   const MAX_KILLS = 30;
+  const MIN_CAPTURE_TARGET = 1;
+  const MAX_CAPTURE_TARGET = 10;
   const MIN_WIN_SCORE = 1;
   const MAX_WIN_SCORE = 10;
   let maze = null;
@@ -131,6 +139,10 @@
   let tanks = [];
   let bullets = [];
   let items = []; // 场上道具：{id, type, x, y}
+  // 占点模式当前据点：{ id, x, y, radius, progress, ownerId, ownerColor, status }。
+  // 其他模式为 null；x/y/radius 在换点时变化，progress 每帧同步。
+  let capturePoint = null;
+  let pointCaptureFx = []; // 占领完成 / 换点时的扩散圆环特效
   let explosions = []; // 死亡爆炸特效：{x, y, color, startTime}
   let trails = []; // 加速拖尾粒子：{x, y, start}
   let spawnBlockFx = []; // 出生保护格挡火花：{x, y, start}
@@ -154,11 +166,12 @@
     { key: 'scatter', name: '散块', desc: '随机短墙' },
     { key: 'random', name: '随机', desc: '每回合抽一种' },
   ];
-  // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式沿用大乱斗的复活节奏，
-  // 经典模式保留原有的淘汰制玩法。
+  // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式按红蓝两队累计击杀，
+  // 占点模式排在团队模式下面，经典模式保留原有的淘汰制玩法。
   const MODE_OPTIONS = [
     { key: 'brawl', name: '大乱斗', tagline: '10 秒复活 · 击杀定胜负' },
     { key: 'team', name: '团队模式', tagline: '红蓝对抗 · 团队击杀定胜负' },
+    { key: 'capture', name: '占点模式', tagline: '10 秒复活 · 占点得分' },
     { key: 'classic', name: '经典模式', tagline: '一条命 · 回合定胜负' },
   ];
   function modeName(key) {
@@ -185,9 +198,12 @@
   function isTeamMode() {
     return mode === 'team';
   }
-  // 大乱斗和团队模式都有 10 秒复活；经典模式没有。
+  function isCaptureMode() {
+    return mode === 'capture';
+  }
+  // 大乱斗、占点模式和团队模式都有 10 秒复活；经典模式没有。
   function hasRespawn() {
-    return mode === 'brawl' || mode === 'team';
+    return mode === 'brawl' || mode === 'capture' || mode === 'team';
   }
   // 团队模式下坦克/爆炸统一使用队伍色；个人颜色只在非团队模式使用。
   function displayColor(t) {
@@ -518,6 +534,9 @@
         hitFlash = {};
         lastHp = {};
         items = [];
+        // 占点模式：开局据点由 game_start 下发；其他模式为 null。
+        capturePoint = msg.point || null;
+        pointCaptureFx = [];
         prevAlive = {};
         prevShield = {};
         prevPos = {};
@@ -564,6 +583,19 @@
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
+        // 占点模式：每帧同步据点进度；id 变化说明旧据点被占领、换到新位置了，
+        // 在新位置补一个短暂的白色扩散环，提醒玩家新据点在哪儿。
+        const prevPointId = capturePoint ? capturePoint.id : null;
+        capturePoint = msg.point || null;
+        if (capturePoint && prevPointId !== null && capturePoint.id !== prevPointId) {
+          pointCaptureFx.push({
+            x: capturePoint.x,
+            y: capturePoint.y,
+            color: '#F2FBF9',
+            start: performance.now(),
+            kind: 'spawn',
+          });
+        }
         // 名单有进出、个人击杀数或团队总击杀变化时立即重建顶部标签。
         if (activeChanged || specChanged || scoreChanged || teamChanged) renderHud();
         syncSelfState(); // 自己阵亡/观战时收起触屏控件并清空输入
@@ -597,6 +629,14 @@
           if (tank) spawnFloatText(tank.x, tank.y - 30, '+1', '#06D6A0');
         });
         break;
+
+      case 'point_captured': {
+        // 占点完成：旧据点位置播放扩散环 + 飘字；紧接着的 state 会把据点换到新位置。
+        const color = msg.color || '#F2FBF9';
+        pointCaptureFx.push({ x: msg.x, y: msg.y, color, start: performance.now(), kind: 'capture' });
+        spawnFloatText(msg.x, msg.y - 24, '+1 占领', color);
+        break;
+      }
 
       case 'round_end':
         players = msg.scores || players;
@@ -650,6 +690,12 @@
             ? `🏆 ${champion.name} 以 ${champion.score} 杀赢得整场比赛！`
             : `🏆 ${nameOf(msg.winnerId)} 赢得整场比赛！`;
           overlaySub.textContent = '即将返回房间…';
+        } else if (mode === 'capture') {
+          const champion = players.find((p) => p.id === msg.winnerId);
+          overlayTitle.textContent = champion
+            ? `🏆 ${champion.name} 以 ${champion.score} 次占领赢得比赛！`
+            : `🏆 ${nameOf(msg.winnerId)} 赢得比赛！`;
+          overlaySub.textContent = '即将返回房间…';
         } else {
           overlayTitle.textContent = `🏆 ${nameOf(msg.winnerId)} 赢得整场比赛！`;
           overlaySub.textContent = '即将返回房间…';
@@ -657,6 +703,8 @@
         overlayRound.classList.remove('hidden');
         setTimeout(() => {
           overlayRound.classList.add('hidden');
+          capturePoint = null;
+          pointCaptureFx = [];
           renderLobby();
           showView('lobby');
         }, 2500);
@@ -670,16 +718,20 @@
   }
 
   // 房间级模式设置统一从服务端消息同步，避免 joined / room_update / game_start 各写一套。
-  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 team 会被静默改成大乱斗。
+  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 capture / team 会被静默改成大乱斗。
   function syncModeSettings(msg) {
-    if (msg.mode === 'brawl' || msg.mode === 'team' || msg.mode === 'classic') {
+    if (msg.mode === 'brawl' || msg.mode === 'capture' || msg.mode === 'team' || msg.mode === 'classic') {
       mode = msg.mode;
     } else {
       mode = 'brawl';
     }
     if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
+    if (Number.isInteger(msg.captureTarget)) captureTarget = msg.captureTarget;
     if (Number.isInteger(msg.winScore)) winScore = msg.winScore;
     if (Number.isFinite(msg.respawnDelay)) respawnDelay = msg.respawnDelay;
+    if (Number.isFinite(msg.captureTime)) captureTime = msg.captureTime;
+    // 只有消息里显式带了 point 才覆盖：match_end 等消息不带据点，不能把上一帧的据点清掉。
+    if (msg.point !== undefined) capturePoint = msg.point || null;
     if (msg.teamKills && typeof msg.teamKills === 'object') syncTeamKills(msg.teamKills);
   }
 
@@ -838,6 +890,8 @@
     tanks = [];
     bullets = [];
     items = [];
+    capturePoint = null;
+    pointCaptureFx = [];
     explosions = [];
     trails = [];
     spawnBlockFx = [];
@@ -988,6 +1042,7 @@
     renderMapPicker();
     renderHpSetting();
     renderKillTargetSetting();
+    renderCaptureTargetSetting();
     renderWinScoreSetting();
     renderTeamSetting();
   }
@@ -1091,6 +1146,8 @@
 
     if (mode === 'brawl') {
       modeDescEl.textContent = `阵亡后 ${respawnDelay} 秒复活，先达到 ${killTarget} 次击杀者获胜。`;
+    } else if (mode === 'capture') {
+      modeDescEl.textContent = `阵亡后 ${respawnDelay} 秒复活；独自站圈 ${captureTime} 秒占领一次，先占 ${captureTarget} 次者获胜。`;
     } else if (mode === 'team') {
       modeDescEl.textContent = `红蓝两队对抗，阵亡后 ${respawnDelay} 秒复活；先达到 ${killTarget} 次团队击杀的队伍获胜，友军伤害关闭。`;
     } else {
@@ -1128,6 +1185,34 @@
   killTargetInputEl.addEventListener('change', () => requestKillTarget(killTargetInputEl.value));
   btnKillsMinus.addEventListener('click', () => requestKillTarget(clampKillTarget(killTargetInputEl.value) - 1));
   btnKillsPlus.addEventListener('click', () => requestKillTarget(clampKillTarget(killTargetInputEl.value) + 1));
+
+  // ---------- 占点模式占领目标 ----------
+  function clampCaptureTarget(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return captureTarget;
+    return clampNum(n, MIN_CAPTURE_TARGET, MAX_CAPTURE_TARGET);
+  }
+
+  function renderCaptureTargetSetting() {
+    const amHost = myId === hostId;
+    captureTargetGroup.classList.toggle('hidden', mode !== 'capture');
+    if (document.activeElement !== captureTargetInputEl) captureTargetInputEl.value = String(captureTarget);
+    const disabled = !amHost || mode !== 'capture';
+    captureTargetInputEl.disabled = disabled;
+    btnCaptureMinus.disabled = disabled;
+    btnCapturePlus.disabled = disabled;
+  }
+
+  function requestCaptureTarget(value) {
+    if (mode !== 'capture') return;
+    const next = clampCaptureTarget(value);
+    captureTargetInputEl.value = String(next);
+    if (next !== captureTarget) send({ type: 'set_capture_target', target: next });
+  }
+
+  captureTargetInputEl.addEventListener('change', () => requestCaptureTarget(captureTargetInputEl.value));
+  btnCaptureMinus.addEventListener('click', () => requestCaptureTarget(clampCaptureTarget(captureTargetInputEl.value) - 1));
+  btnCapturePlus.addEventListener('click', () => requestCaptureTarget(clampCaptureTarget(captureTargetInputEl.value) + 1));
 
   // ---------- 经典模式胜利分数 ----------
   function clampWinScore(v) {
@@ -1255,6 +1340,8 @@
     matchIntroModeEl.textContent = modeName(mode);
     if (mode === 'brawl') {
       matchIntroGoalEl.textContent = `先达到 ${killTarget} 次击杀`;
+    } else if (mode === 'capture') {
+      matchIntroGoalEl.textContent = `先占领 ${captureTarget} 次据点`;
     } else if (mode === 'team') {
       matchIntroGoalEl.textContent = `红蓝对抗 · 先达到 ${killTarget} 次团队击杀`;
     } else {
@@ -1456,6 +1543,77 @@
     ctx.strokeStyle = '#06110F';
     ctx.lineWidth = 8;
     ctx.strokeRect(4, 4, worldW - 8, worldH - 8);
+  }
+
+  // ---------- 占点模式的据点 ----------
+  // 圈允许跨墙，所以画在墙体之上，避免进度弧被迷宫墙遮掉一截。
+  // 只有三样东西：极淡的圈内底色 + 一圈实线边界 + 同半径的进度弧。
+  // 不发光、不铺满底盘、不画中心菱形——据点只需要回答"圈在哪"和"谁占了多少"。
+  // 进度和边界同半径，所以整张图永远只有一圈，不会出现内外双环打架。
+  // 据点本体统一用白色（中立物件，不属于任何队伍）；争夺时改成虚线，
+  // 用"断裂 / 卡住"的形态表达，避免再引入第二种高饱和颜色和玩家的车色打架。
+  const POINT_COLOR = '#F2FBF9';
+  const POINT_RING_WIDTH = 3;
+  const POINT_PROGRESS_WIDTH = 6;
+  const POINT_CONTESTED_DASH = [9, 7];
+
+  function drawCapturePoint() {
+    if (!isCaptureMode() || !capturePoint) return;
+    const { x, y, radius, progress } = capturePoint;
+    const contested = capturePoint.status === 'contested';
+    const stateColor = POINT_COLOR;
+    // 进度弧用占领者颜色：圈是中立的，但"谁在占"必须一眼看出来。
+    const ownerColor = capturePoint.ownerColor || stateColor;
+    ctx.save();
+
+    // 圈内极淡底色：只用来快速分辨"圈里 / 圈外"，透明度低到不会压住坦克和子弹
+    ctx.globalAlpha = 0.07;
+    ctx.fillStyle = stateColor;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 边界：实线 3px，保证第一眼就能在迷宫里找到据点，又不至于像一堵墙
+    ctx.globalAlpha = contested ? 0.95 : 0.9;
+    ctx.strokeStyle = stateColor;
+    ctx.lineWidth = POINT_RING_WIDTH;
+    // 争夺时整圈变成虚线：进度被冻住，形态也跟着"断开"
+    ctx.setLineDash(contested ? POINT_CONTESTED_DASH : []);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 进度：和边界同半径的粗弧，从 12 点方向顺时针填充，颜色 = 占领者。
+    // 争夺时进度冻住，弧线压暗，用"卡住了"的观感代替额外的图标或文字。
+    if (progress > 0) {
+      ctx.globalAlpha = contested ? 0.35 : 1;
+      ctx.strokeStyle = ownerColor;
+      ctx.lineWidth = POINT_PROGRESS_WIDTH;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(x, y, radius, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // 占领完成 / 换点的扩散环，给玩家一个"刚才发生了什么"的瞬时反馈。
+  function drawPointCaptureFx(now) {
+    const LIFE = 900;
+    pointCaptureFx = pointCaptureFx.filter((f) => now - f.start < LIFE);
+    pointCaptureFx.forEach((f) => {
+      const t = Math.min(1, (now - f.start) / LIFE);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, (1 - t) * 0.85);
+      ctx.strokeStyle = f.color;
+      ctx.lineWidth = f.kind === 'spawn' ? 2 : 3;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, 16 + 84 * t, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    });
   }
 
   // ---------- 头顶血条 ----------
@@ -1945,6 +2103,7 @@
     ctx.fillStyle = '#1B4B43';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     drawMaze();
+    drawCapturePoint();
     drawItems();
     drawTrails(now);
     tanks.forEach((t) => drawTank(t, now));
@@ -1953,6 +2112,7 @@
     drawExplosions(now);
     drawShieldBreaks(now);
     drawSpawnBlocks(now);
+    drawPointCaptureFx(now);
     drawHitSparks(now);
     drawFloatTexts(now);
   }

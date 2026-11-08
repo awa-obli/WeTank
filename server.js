@@ -8,6 +8,15 @@ const WebSocket = require('ws');
 const physics = require('./physics');
 const { pickSpawnCells, pickRespawnCell } = require('./spawn');
 const { generateMap } = require('./maps');
+const {
+  CAPTURE_RADIUS,
+  CAPTURE_TIME,
+  DECAY_EMPTY_TIME,
+  DECAY_NEUTRALIZE_TIME,
+  createCapturePoint,
+  stepCapture,
+  isInside,
+} = require('./capture');
 
 // ---------- 常量配置 ----------
 const PORT = process.env.PORT || 8080;
@@ -74,12 +83,14 @@ const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
 
 // ---------- 游戏模式 ----------
 // brawl（大乱斗）是默认模式：单局连续死斗，阵亡 10 秒后在随机位置复活，
-// 先达到房间设置的击杀目标者获胜；team（团队模式）沿用大乱斗的复活节奏，
-// 但按红蓝两队累计击杀，先达到目标的队伍获胜；classic（经典模式）保留原玩法：
-// 淘汰制回合计分，先达到房间设置的胜利分数者获胜。
+// 先达到房间设置的击杀目标者获胜；team（团队模式）同样复活，但按红蓝两队累计击杀，
+// 先达到目标的队伍获胜；capture（占点模式）也沿用复活节奏，目标改为占据场上唯一的据点：
+// 单人站圈 12 秒占领一次得 1 分，据点随后随机换位，先达到房间设置的占领目标者获胜；
+// classic（经典模式）保留原玩法：淘汰制回合计分。
 const MODES = {
   brawl: { key: 'brawl', name: '大乱斗' },
   team: { key: 'team', name: '团队模式' },
+  capture: { key: 'capture', name: '占点模式' },
   classic: { key: 'classic', name: '经典模式' },
 };
 const DEFAULT_MODE = 'brawl';
@@ -96,9 +107,9 @@ function otherTeam(team) {
   return team === 'red' ? 'blue' : 'red';
 }
 
-// 大乱斗和团队模式都是"连续复活、击杀目标定胜负"，只有经典模式没有复活机制。
+// 大乱斗、占点模式、团队模式都是"连续复活、按目标定胜负"，只有经典模式没有复活机制。
 function hasRespawn(mode) {
-  return mode === 'brawl' || mode === 'team';
+  return mode === 'brawl' || mode === 'capture' || mode === 'team';
 }
 
 // 大乱斗 / 团队模式：复活等待时长（秒，固定）与击杀目标（房间级设置，房主可改）。
@@ -107,6 +118,12 @@ const BRAWL_RESPAWN_DELAY = 10;
 const DEFAULT_KILL_TARGET = 10;
 const MIN_KILL_TARGET = 5;
 const MAX_KILL_TARGET = 30;
+
+// 占点模式：占领目标（房间级设置，房主可改，默认 3 次）。
+// 占点一次得 1 分，达到目标即结束整场；据点被占领后随机换位。
+const DEFAULT_CAPTURE_TARGET = 3;
+const MIN_CAPTURE_TARGET = 1;
+const MAX_CAPTURE_TARGET = 10;
 
 // 经典模式：胜利所需回合数（房间级设置，房主可改，默认即原来的 5 回合）
 const DEFAULT_WIN_SCORE = 5;
@@ -124,9 +141,11 @@ const BULLET_DAMAGE = 1;
 const REPAIR_HEAL = 1;
 
 // 色板长度必须 >= MAX_PLAYERS，否则房间没满就可能出现两人同色。
+// 第 10 位用中性灰而不是白色：白色留给据点圆环、名字文字等"中立"元素，
+// 否则白车开在白圈里会互相吃掉轮廓。
 const PLAYER_COLORS = [
   '#E63946', '#3A86FF', '#FFD60A', '#06D6A0', '#FF8A3D',
-  '#C77DFF', '#FF5DA2', '#00C2FF', '#A8E10C', '#F2FBF9',
+  '#C77DFF', '#FF5DA2', '#00C2FF', '#A8E10C', '#A9A9A9',
 ];
 const MAX_PLAYERS = 10;
 // 房间名只用于列表展示，限制长度并清理控制字符即可；重名允许，房间码才是唯一标识。
@@ -245,10 +264,16 @@ class Room {
     this.maxHp = DEFAULT_MAX_HP;
     // 游戏模式与各模式的胜利目标同样是房间级设置，只在大厅可改：
     //   brawl   → killTarget（击杀数）
+    //   capture → captureTarget（占领次数）
     //   classic → winScore（回合胜场数）
     this.mode = DEFAULT_MODE;
     this.killTarget = DEFAULT_KILL_TARGET;
+    this.captureTarget = DEFAULT_CAPTURE_TARGET;
     this.winScore = DEFAULT_WIN_SCORE;
+    // 占点模式当前据点：{ id, x, y, radius, progress, ownerId, ownerColor, status }。
+    // 只有 capture 模式在 startRound 时生成；其他模式保持 null。
+    this.point = null;
+    this.nextPointId = 1;
     // 团队模式专用：每队累计击杀数。个人击杀仍记在 p.score，团队分是独立的房间级统计，
     // 这样中途有人离开时，他此前为队伍拿到的分不会跟着消失。
     this.teamKills = { red: 0, blue: 0 };
@@ -284,7 +309,9 @@ class Room {
       maxHp: this.maxHp,
       mode: this.mode,
       killTarget: this.killTarget,
+      captureTarget: this.captureTarget,
       winScore: this.winScore,
+      captureTime: CAPTURE_TIME,
     });
   }
 
@@ -304,6 +331,23 @@ class Room {
     return [...this.spectators.values()].map((s) => ({ id: s.id, name: s.name }));
   }
 
+  // 据点的公开快照：x/y/radius 只在换点时变化，progress/owner/status 每帧都可能变。
+  // 非占点模式没有据点，统一返回 null，客户端只需判空。
+  pointMessage() {
+    if (!this.point) return null;
+    const p = this.point;
+    return {
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      radius: p.radius,
+      progress: Math.round(p.progress * 1000) / 1000,
+      ownerId: p.ownerId,
+      ownerColor: p.ownerColor,
+      status: p.status,
+    };
+  }
+
   memberCount() {
     return this.players.size + this.spectators.size;
   }
@@ -311,7 +355,7 @@ class Room {
   assignColor() {
     const used = new Set([...this.players.values()].map((p) => p.color));
     const free = PLAYER_COLORS.filter((c) => !used.has(c));
-    return free.length ? free[0] : '#F2FBF9'; // 色板用完只是兜底，正常情况下 10 人以内不会走到这里
+    return free.length ? free[0] : '#A9A9A9'; // 色板用完只是兜底，正常情况下 10 人以内不会走到这里
   }
 
   // ---------- 团队模式：分队 ----------
@@ -404,7 +448,11 @@ class Room {
       maxHp: this.maxHp,
       mode: this.mode,
       killTarget: this.killTarget,
+      captureTarget: this.captureTarget,
       winScore: this.winScore,
+      // 占点模式：CAPTURE_TIME 用于大厅/开局公告文案，point 是本局当前的据点。
+      captureTime: CAPTURE_TIME,
+      point: this.pointMessage(),
       // 团队模式开局清零；非团队模式也带一个全 0 的对象，客户端可以无脑读取。
       teamKills: { ...this.teamKills },
       respawnDelay: BRAWL_RESPAWN_DELAY,
@@ -449,6 +497,8 @@ class Room {
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, x: b.x, y: b.y, owner: b.owner, homing: b.homing })),
       items: this.items.map((it) => ({ id: it.id, type: it.type, x: it.x, y: it.y })),
+      // 占点模式的据点：进度、占领者、争夺/衰减状态；其他模式恒为 null。
+      point: this.pointMessage(),
       // 团队总击杀：和每帧 state 一起下发，客户端 HUD 只在这个值变化时重建。
       teamKills: { ...this.teamKills },
       spectators: this.spectatorList(),
@@ -474,19 +524,26 @@ class Room {
     this.bullets = [];
     this.items = [];
     this.itemSpawnAcc = 0;
+    // 占点模式每局重新生成一个据点；其他模式没有据点。
+    // 据点允许跨墙，圆心完全随机，只保留一个半径的边距让整个圆留在图内。
+    this.point = null;
+    if (this.mode === 'capture') this.point = this.createNewPoint();
     if (this.pendingTimeout) {
       clearTimeout(this.pendingTimeout);
       this.pendingTimeout = null;
     }
     this.pendingWinnerId = null;
     // 出生点每回合重新随机，范围覆盖整张地图的所有格心（见 spawn.js）。
-    // 当前规则只要求不和其他玩家落在同一格，10 人以内任意人数都放得下；
-    // 朝向也是完全随机，出生后往哪边开由玩家自己决定。
+    // 占点模式额外避开据点圈：否则一出生就站在圈里，白拿占领进度。
+    const avoidZones = this.point
+      ? [{ x: this.point.x, y: this.point.y, r: this.point.radius + TANK_RADIUS + 4 }]
+      : [];
     const spawns = pickSpawnCells({
       cols: this.cols,
       rows: this.rows,
       cell: CELL,
       count: this.players.size,
+      avoidZones,
     });
     [...this.players.values()].forEach((p, i) => {
       const spot = spawns[i];
@@ -518,6 +575,19 @@ class Room {
     if (!this.tickHandle) {
       this.tickHandle = setInterval(() => this.tick(), 1000 / TICK_RATE);
     }
+  }
+
+  // 生成一个新据点（id 递增，客户端据此判断"换点了"）。
+  // 位置完全随机：不对齐格心、不避开存活坦克，只保留一个半径的边距让整个圆留在图内。
+  createNewPoint() {
+    const point = createCapturePoint({
+      cols: this.cols,
+      rows: this.rows,
+      cell: CELL,
+      radius: CAPTURE_RADIUS,
+    });
+    point.id = this.nextPointId++;
+    return point;
   }
 
   tick() {
@@ -784,20 +854,25 @@ class Room {
                 p.alive = false;
                 p.lastHitBy = b.owner;
                 if (hasRespawn(this.mode)) {
-                  // 大乱斗 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，由 updateRespawns 放回场上。
+                  // 大乱斗 / 占点 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，
+                  // 由 updateRespawns 放回场上。
                   p.respawnRemaining = BRAWL_RESPAWN_DELAY;
                   // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
                   p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
                   // 击杀统计：自己打自己（跳弹命中自己）不计分；
                   // 已经阵亡的击杀者生前打出的子弹仍然算他的击杀。
-                  const killer = this.players.get(b.owner);
-                  if (killer && killer.id !== p.id) killer.score += 1;
-                  // 团队总分独立累计：只统计跨队击杀，自杀不计。
-                  // 击杀者中途离场时用子弹上记录的 team，保证这一分仍归原队伍。
-                  if (this.mode === 'team') {
-                    const killerTeam = (killer && killer.team) || b.team || null;
-                    if (killerTeam && p.team && killerTeam !== p.team) {
-                      this.teamKills[killerTeam] += 1;
+                  // 占点模式的 score 是"占领次数"，击杀不直接得分，所以这里只给
+                  // 大乱斗 / 团队模式累计击杀分。
+                  if (this.mode === 'brawl' || this.mode === 'team') {
+                    const killer = this.players.get(b.owner);
+                    if (killer && killer.id !== p.id) killer.score += 1;
+                    // 团队总分独立累计：只统计跨队击杀，自杀不计。
+                    // 击杀者中途离场时用子弹上记录的 team，保证这一分仍归原队伍。
+                    if (this.mode === 'team') {
+                      const killerTeam = (killer && killer.team) || b.team || null;
+                      if (killerTeam && p.team && killerTeam !== p.team) {
+                        this.teamKills[killerTeam] += 1;
+                      }
                     }
                   }
                 }
@@ -828,6 +903,43 @@ class Room {
       this.broadcast({ type: 'damage', hits: damageHits });
     }
 
+    // --- 占点模式：据点进度 ---
+    // 放在子弹结算之后，保证本帧刚被打死的玩家不会继续占点/争夺。
+    // 出生保护不影响占点（需求确认：进圈不解除保护，保护期内也正常参与判定）。
+    let captureWinner = null;
+    if (this.mode === 'capture' && this.point && this.state === 'playing') {
+      const occupants = [];
+      for (const p of this.players.values()) {
+        if (!p.alive || p.spawnAnimRemaining > 0) continue;
+        if (isInside(this.point, p.x, p.y)) occupants.push(p);
+      }
+      if (stepCapture(this.point, occupants, DT)) {
+        const owner = this.players.get(this.point.ownerId);
+        if (owner) {
+          owner.score += 1;
+          // 先广播占领完成（带旧据点的位置），客户端据此在旧位置播放特效；
+          // 然后再决定是结束整场，还是随机换一个新据点。
+          this.broadcast({
+            type: 'point_captured',
+            playerId: owner.id,
+            name: owner.name,
+            color: owner.color,
+            score: owner.score,
+            target: this.captureTarget,
+            x: this.point.x,
+            y: this.point.y,
+            radius: this.point.radius,
+          });
+          if (owner.score >= this.captureTarget) {
+            captureWinner = owner;
+          } else {
+            // 换点完全随机：可能直接刷在某个存活玩家脚下，不再刻意避开。
+            this.point = this.createNewPoint();
+          }
+        }
+      }
+    }
+
     // --- 私发弹药 ---
     // 弹药是个人资源，绝不放进公共 state：每个玩家只收到自己那一份，
     // "只能看到自己的弹药"是协议层面的保证，而不是靠客户端自觉隐藏。
@@ -846,6 +958,13 @@ class Room {
 
     // --- 广播状态 ---
     this.broadcast(this.stateMessage());
+
+    // --- 占点模式胜负判断 ---
+    // 先让客户端收到"占领者得分 + 旧据点 100%"的最后一帧 state，再广播 match_end。
+    if (captureWinner) {
+      this.advanceAfterRound(captureWinner);
+      return;
+    }
 
     // --- 大乱斗胜负判断 ---
     // 以击杀数为胜利条件：任意玩家达到房间设置的击杀目标就结束整场。
@@ -930,11 +1049,16 @@ class Room {
     const avoid = [...this.players.values()]
       .filter((o) => o !== p && o.alive)
       .map((o) => ({ x: o.x, y: o.y }));
+    // 占点模式：复活点不要落在当前据点圈内，避免一复活就开始白拿进度。
+    const avoidZones = this.point
+      ? [{ x: this.point.x, y: this.point.y, r: this.point.radius + TANK_RADIUS + 4 }]
+      : [];
     const spot = pickRespawnCell({
       cols: this.cols,
       rows: this.rows,
       cell: CELL,
       avoid,
+      avoidZones,
       minDist: TANK_RADIUS * 2,
     });
     if (spot) {
@@ -1063,6 +1187,7 @@ class Room {
       reason,
       mode: this.mode,
       killTarget: this.killTarget,
+      captureTarget: this.captureTarget,
       winScore: this.winScore,
     });
     this.broadcastRoom();
@@ -1085,6 +1210,7 @@ class Room {
       reason,
       mode: this.mode,
       killTarget: this.killTarget,
+      captureTarget: this.captureTarget,
       winScore: this.winScore,
     });
     this.broadcastRoom();
@@ -1106,6 +1232,7 @@ class Room {
         spectators: [],
         mode: this.mode,
         killTarget: this.killTarget,
+        captureTarget: this.captureTarget,
         winScore: this.winScore,
       });
       this.broadcastRoom();
@@ -1256,7 +1383,8 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: [],
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-        mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+        mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
+        winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       broadcastRoomList();
@@ -1292,7 +1420,8 @@ wss.on('connection', (ws) => {
           type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
           spectating: true, players: room.playerList(), spectators: room.spectatorList(),
           mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-          mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+          mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
+          winScore: room.winScore, captureTime: CAPTURE_TIME,
           respawnDelay: BRAWL_RESPAWN_DELAY,
         }));
         // 补发当前迷宫和状态，观战者不用等下一帧也能立即看到完整对局。
@@ -1314,7 +1443,8 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: room.spectatorList(),
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-        mode: room.mode, killTarget: room.killTarget, winScore: room.winScore,
+        mode: room.mode, killTarget: room.killTarget, captureTarget: room.captureTarget,
+        winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
       }));
       room.broadcastRoom();
@@ -1442,6 +1572,32 @@ wss.on('connection', (ws) => {
       }
       if (currentRoom.killTarget !== kills) {
         currentRoom.killTarget = kills;
+        currentRoom.broadcastRoom();
+      }
+      return;
+    }
+
+    if (msg.type === 'set_capture_target') {
+      // 占领目标与击杀目标一样是房主专属、只在大厅可改。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改占领目标' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改占领目标' }));
+        return;
+      }
+      if (currentRoom.mode !== 'capture') {
+        ws.send(JSON.stringify({ type: 'error', message: '只有占点模式可以设置占领目标' }));
+        return;
+      }
+      const target = parseInteger(msg.target);
+      if (!Number.isInteger(target) || target < MIN_CAPTURE_TARGET || target > MAX_CAPTURE_TARGET) {
+        ws.send(JSON.stringify({ type: 'error', message: `占领目标必须是 ${MIN_CAPTURE_TARGET}–${MAX_CAPTURE_TARGET} 之间的整数` }));
+        return;
+      }
+      if (currentRoom.captureTarget !== target) {
+        currentRoom.captureTarget = target;
         currentRoom.broadcastRoom();
       }
       return;
@@ -1655,6 +1811,13 @@ module.exports = {
   DEFAULT_KILL_TARGET,
   MIN_KILL_TARGET,
   MAX_KILL_TARGET,
+  DEFAULT_CAPTURE_TARGET,
+  MIN_CAPTURE_TARGET,
+  MAX_CAPTURE_TARGET,
+  CAPTURE_RADIUS,
+  CAPTURE_TIME,
+  DECAY_EMPTY_TIME,
+  DECAY_NEUTRALIZE_TIME,
   DEFAULT_WIN_SCORE,
   MIN_WIN_SCORE,
   MAX_WIN_SCORE,
