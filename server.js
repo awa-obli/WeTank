@@ -9,6 +9,15 @@ const physics = require('./physics');
 const { pickSpawnCells, pickRespawnCell } = require('./spawn');
 const { generateMap } = require('./maps');
 const {
+  LASER_LENGTH,
+  LASER_MAX_BOUNCES,
+  LASER_HALF_WIDTH,
+  LASER_DAMAGE,
+  LASER_MUZZLE_OFFSET,
+  traceLaserPath,
+  collectLaserHits,
+} = require('./laser');
+const {
   CAPTURE_RADIUS,
   CAPTURE_TIME,
   DECAY_EMPTY_TIME,
@@ -67,7 +76,10 @@ const BULLET_OWNER_GRACE = 0.1; // 出生后一小段时间内不会打到自己
 const AMMO_MAX = 5;
 const AMMO_REGEN_INTERVAL = 5; // 秒，每补 1 发所需的装填时间
 const AMMO_COST_NORMAL = 1;
-const AMMO_COST_TRIPLE = 3; // 三连发一次打出 3 颗子弹，按 3 发弹药结算
+const AMMO_COST_TRIPLE = 1; // 三连发一次打出 3 颗子弹，但只按 1 发弹药结算
+// 弹药箱道具：拾取后直接补满（封顶 AMMO_MAX）。满弹时仍会拾取、道具消失，实际补充 0，
+// 与维修包"满血也捡"的规则保持一致。
+const AMMO_REFILL = AMMO_MAX;
 
 const TICK_RATE = 30;
 const DT = 1 / TICK_RATE;
@@ -160,8 +172,9 @@ const SPAWN_PROTECT_TIME = 3;
 const SPAWN_MATERIALIZE_TIME = 0.75;
 
 // ---------- 道具系统 ----------
-// repair 是血量机制配套的回血道具（维修包），其余 5 种是原有的增益道具。
-const ITEM_TYPES = ['shield', 'speed', 'triple', 'homing', 'invisible', 'repair'];
+// repair 是血量机制配套的回血道具（维修包），laser 是一次性的反弹射线，
+// ammo 是弹药箱：拾取后直接补满弹药；其余 5 种是原有的增益道具。
+const ITEM_TYPES = ['shield', 'speed', 'triple', 'homing', 'invisible', 'repair', 'laser', 'ammo'];
 const ITEM_SPAWN_INTERVAL = 15; // 秒，场上无论有多少道具，每隔这么久固定刷新一个新的
 const ITEM_RADIUS = 14; // 拾取判定半径（视觉半径同用这个）
 const SPEED_BOOST_DURATION = 6; // 秒
@@ -201,9 +214,9 @@ function makePlayer(id, name, ws, room) {
     team: null,
     score: 0, x: 0, y: 0, angle: 0, alive: true, hp: room.maxHp, cooldown: 0,
     input: { forward: false, backward: false, left: false, right: false, shoot: false },
-    shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, invisibleRemaining: 0,
+    shield: false, speedBoostRemaining: 0, tripleReady: false, homingReady: false, laserReady: false, invisibleRemaining: 0,
     spawnProtectRemaining: 0, spawnAnimRemaining: 0,
-    ammo: AMMO_MAX, ammoReloadAcc: 0,
+    ammo: AMMO_MAX, ammoReloadAcc: 0, ammoPickupGain: 0,
     // 大乱斗专用：阵亡后的复活倒计时（秒），0 表示活着或不在等待复活。
     respawnRemaining: 0,
   };
@@ -484,6 +497,7 @@ class Room {
         speedBoost: p.speedBoostRemaining > 0,
         tripleReady: p.tripleReady,
         homingReady: p.homingReady,
+        laserReady: p.laserReady,
         invisible: p.invisibleRemaining > 0,
         // 出生保护剩余秒数（保留 1 位小数）：客户端用它画光环进度弧，
         // 0 表示没有保护；和道具护盾的 shield 字段完全独立。
@@ -558,10 +572,12 @@ class Room {
       p.speedBoostRemaining = 0;
       p.tripleReady = false;
       p.homingReady = false;
+      p.laserReady = false;
       p.invisibleRemaining = 0;
       // 弹药和血量一样每回合重置：开局满弹，装填进度清零
       p.ammo = AMMO_MAX;
       p.ammoReloadAcc = 0;
+      p.ammoPickupGain = 0;
       // 每回合开局都重新给满 3 秒出生保护，开火会提前结束（见 tick 的射击分支）。
       // 保护倒计时先冻结，等 0.75 秒重生动画播完、坦克真正出现后才开始走。
       p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
@@ -596,6 +612,8 @@ class Room {
     // 随后再统一计算存活名单，复活者会带着出生动画进入下面的移动/碰撞逻辑。
     if (hasRespawn(this.mode) && this.state === 'playing') this.updateRespawns();
     const alivePlayers = [...this.players.values()].filter((p) => p.alive);
+    // 本帧开火产生的激光先记下来，等坦克移动/推挤完成、拿到最终位置后再统一求路径。
+    const pendingLasers = [];
 
     // --- 坦克移动 ---
     for (const p of alivePlayers) {
@@ -667,39 +685,51 @@ class Room {
       }
 
       // 射击：冷却结束 + 弹药足够才打得出去。
-      // 普通单发花 1 发；三连发一次打出 3 颗子弹、按 3 发弹药结算，
-      // 弹药不足 3 发时整发打不出去（三连发道具保持就绪，等装填够了再用），
-      // 避免"手里有 1 发却被迫打一发单发、把三连发道具浪费掉"的歧义。
+      // 普通单发、三连发、激光都只消耗 1 发弹药；三连发一次打出 3 颗子弹。
+      // 0 弹时整发打不出去（三连发/激光道具保持就绪，等装填够了再用）。
       p.cooldown = Math.max(0, p.cooldown - DT);
       // 三连发道具：拾取后下一次射击打出扇形三发子弹，用一次就消耗掉；
       // 不是"充能次数"，触发一次后立即回落为普通单发。
       const useTriple = p.tripleReady;
       const useHoming = p.homingReady;
+      const useLaser = p.laserReady;
       const ammoCost = useTriple ? AMMO_COST_TRIPLE : AMMO_COST_NORMAL;
       if (input.shoot && p.cooldown <= 0 && p.ammo >= ammoCost) {
-        const angles = useTriple
-          ? [p.angle - TRIPLE_SPREAD_RAD, p.angle, p.angle + TRIPLE_SPREAD_RAD]
-          : [p.angle];
-        for (const shotAngle of angles) {
-          const bx = p.x + Math.cos(shotAngle) * (TANK_RADIUS + BULLET_RADIUS + 2);
-          const by = p.y + Math.sin(shotAngle) * (TANK_RADIUS + BULLET_RADIUS + 2);
-          this.bullets.push({
-            id: this.nextBulletId++,
-            owner: p.id,
-            // 发射瞬间记录队伍：关闭友伤、以及击杀者中途离场后的团队分归属都依赖它。
+        if (useLaser) {
+          // 激光不是实体子弹：只记录发射参数，本帧稍后统一求路径并结算伤害。
+          pendingLasers.push({
+            ownerId: p.id,
             team: p.team || null,
-            x: bx,
-            y: by,
-            vx: Math.cos(shotAngle) * BULLET_SPEED,
-            vy: Math.sin(shotAngle) * BULLET_SPEED,
-            bounces: 0,
-            age: 0,
-            homing: useHoming,
+            x: p.x + Math.cos(p.angle) * LASER_MUZZLE_OFFSET,
+            y: p.y + Math.sin(p.angle) * LASER_MUZZLE_OFFSET,
+            angle: p.angle,
           });
+        } else {
+          const angles = useTriple
+            ? [p.angle - TRIPLE_SPREAD_RAD, p.angle, p.angle + TRIPLE_SPREAD_RAD]
+            : [p.angle];
+          for (const shotAngle of angles) {
+            const bx = p.x + Math.cos(shotAngle) * (TANK_RADIUS + BULLET_RADIUS + 2);
+            const by = p.y + Math.sin(shotAngle) * (TANK_RADIUS + BULLET_RADIUS + 2);
+            this.bullets.push({
+              id: this.nextBulletId++,
+              owner: p.id,
+              // 发射瞬间记录队伍：关闭友伤、以及击杀者中途离场后的团队分归属都依赖它。
+              team: p.team || null,
+              x: bx,
+              y: by,
+              vx: Math.cos(shotAngle) * BULLET_SPEED,
+              vy: Math.sin(shotAngle) * BULLET_SPEED,
+              bounces: 0,
+              age: 0,
+              homing: useHoming,
+            });
+          }
         }
         p.ammo -= ammoCost;
         if (useTriple) p.tripleReady = false;
         if (useHoming) p.homingReady = false;
+        if (useLaser) p.laserReady = false;
         p.cooldown = SHOOT_COOLDOWN;
         // 开火即解除出生保护：这一发打出去的同时无敌消失，不给"贴脸无敌期白嫖"留空间
         p.spawnProtectRemaining = 0;
@@ -709,8 +739,41 @@ class Room {
     // 坦克各自移动完之后，再统一处理坦克间的重叠：谁都不允许穿过谁，
     // 而是互相往对方相反方向各推开重叠量的一半，做出"推挤"的手感。
     // 重生动画中的坦克没有实体，不参与推挤、拾取、索敌和受击，下面统一用 solidPlayers。
-    const solidPlayers = alivePlayers.filter((p) => p.spawnAnimRemaining <= 0);
+    let solidPlayers = alivePlayers.filter((p) => p.spawnAnimRemaining <= 0);
     this.resolveTankCollisions(solidPlayers);
+
+    // --- 激光结算 ---
+    // 激光是瞬发路径伤害：等移动/推挤都完成、位置最终确定后，再求这一帧的折线路径。
+    // 路径碰到的每个敌人各掉 1 点血（穿透，不会停在第一个敌人身上）。
+    // 伤害/格挡记录和子弹共用同一组数组，本帧末尾统一广播一次。
+    const spawnBlocks = []; // 本帧被出生保护挡下的命中位置，循环结束后统一广播
+    const damageHits = [];  // 本帧真正造成伤害的命中，循环结束后统一广播给客户端做反馈
+    if (pendingLasers.length > 0) {
+      for (const shot of pendingLasers) {
+        const path = traceLaserPath(shot.x, shot.y, shot.angle, this.maze.rects, {
+          length: LASER_LENGTH,
+          maxBounces: LASER_MAX_BOUNCES,
+        });
+        const hits = collectLaserHits(path.points, solidPlayers, {
+          ownerId: shot.ownerId,
+          ownerTeam: shot.team,
+          teamMode: this.mode === 'team',
+          hitRadius: TANK_RADIUS + LASER_HALF_WIDTH,
+        });
+        for (const hit of hits) {
+          this.applyHit(hit.player, shot.ownerId, shot.team, hit.x, hit.y, LASER_DAMAGE, damageHits, spawnBlocks);
+        }
+        // 光束只用于客户端画一次渐隐特效，不进入每帧 state。
+        this.broadcast({
+          type: 'laser',
+          ownerId: shot.ownerId,
+          points: path.points,
+          hits: hits.map((h) => ({ playerId: h.playerId, x: h.x, y: h.y })),
+        });
+      }
+      // 被激光打死的玩家本帧不再参与拾取（子弹伤害在拾取之后结算，这里保持"先死后拾取"）。
+      solidPlayers = solidPlayers.filter((p) => p.alive);
+    }
 
     // --- 道具刷新 ---
     // 不管场上现在有几个道具、也不管是不是处于残局观察期，每隔 ITEM_SPAWN_INTERVAL 秒
@@ -737,8 +800,8 @@ class Room {
 
     // --- 道具拾取 ---
     // 碰撞即拾取即生效，不做背包；同一帧可以同时拾到多个道具。
-    // 护盾和三连发存在不同的字段里，天然可以同时生效、互不覆盖；
-    // 三连发是布尔态"是否就绪"，重复拾取不会叠加效果，再次拾取只是保持就绪。
+    // 护盾/加速/隐身存在不同的字段里，天然可以同时生效、互不覆盖；
+    // 三连发/追踪弹/激光都是"下一发"状态，三者互斥，后拾取的会覆盖先前的。
     const pickups = [];
     if (this.items.length > 0) {
       const remainingItems = [];
@@ -756,10 +819,19 @@ class Room {
           const hpBefore = takenBy.hp;
           if (it.type === 'shield') takenBy.shield = true;
           else if (it.type === 'speed') takenBy.speedBoostRemaining = SPEED_BOOST_DURATION;
-          else if (it.type === 'triple') { takenBy.tripleReady = true; takenBy.homingReady = false; }
-          else if (it.type === 'homing') { takenBy.homingReady = true; takenBy.tripleReady = false; }
+          else if (it.type === 'triple') { takenBy.tripleReady = true; takenBy.homingReady = false; takenBy.laserReady = false; }
+          else if (it.type === 'homing') { takenBy.homingReady = true; takenBy.tripleReady = false; takenBy.laserReady = false; }
+          else if (it.type === 'laser') { takenBy.laserReady = true; takenBy.tripleReady = false; takenBy.homingReady = false; }
           else if (it.type === 'invisible') takenBy.invisibleRemaining = INVISIBLE_DURATION;
           else if (it.type === 'repair') takenBy.hp = Math.min(this.maxHp, takenBy.hp + REPAIR_HEAL);
+          else if (it.type === 'ammo') {
+            const ammoBefore = takenBy.ammo;
+            takenBy.ammo = Math.min(AMMO_MAX, ammoBefore + AMMO_REFILL);
+            // 本次实际补充量只私发给本人（见下方 ammo 消息），公共广播不带，避免泄露弹药数
+            takenBy.ammoPickupGain += takenBy.ammo - ammoBefore;
+            // 补满后装填进度归零：和"满弹不囤积进度"的规则保持一致
+            if (takenBy.ammo >= AMMO_MAX) takenBy.ammoReloadAcc = 0;
+          }
           // heal 是这次拾取实际回复的血量：满血捡维修包时为 0，客户端据此决定要不要飘 +1
           pickups.push({ playerId: takenBy.id, type: it.type, x: it.x, y: it.y, heal: takenBy.hp - hpBefore });
         } else {
@@ -777,8 +849,6 @@ class Room {
     // 只取最早接触点、按矩形面的法线反射（法线只可能是四个面之一，
     // 旋转后的墙也适用），并且能在一次调用里处理连续多次反弹。子步本身保证坦克命中判定的粒度。
     const survivingBullets = [];
-    const spawnBlocks = []; // 本帧被出生保护挡下的子弹位置，循环结束后统一广播
-    const damageHits = [];  // 本帧真正造成伤害的命中，循环结束后统一广播给客户端做反馈
     for (const b of this.bullets) {
       b.age += DT;
       // 子弹发射时记录过队伍；老测试/旧子弹没有这个字段时按当前 owner 兜底。
@@ -830,62 +900,17 @@ class Room {
         }
 
         for (const p of solidPlayers) {
+          // 同一帧多颗子弹打在同一个人身上时，已经阵亡的目标不再重复结算伤害/击杀。
+          if (!p.alive) continue;
           if (b.owner === p.id && b.age < BULLET_OWNER_GRACE) continue;
           // 团队模式关闭友伤：子弹直接穿过队友（自己的跳弹仍然可以命中自己）。
           if (this.mode === 'team' && bulletTeam && p.team === bulletTeam && p.id !== b.owner) continue;
           const ddx = b.x - p.x;
           const ddy = b.y - p.y;
           if (ddx * ddx + ddy * ddy < (BULLET_RADIUS + TANK_RADIUS) * (BULLET_RADIUS + TANK_RADIUS)) {
-            if (p.spawnProtectRemaining > 0) {
-              // 出生保护：子弹被吸收（不穿透），也不消耗道具护盾；
-              // 记下命中位置，稍后广播给客户端播放格挡火花。
-              spawnBlocks.push({ x: b.x, y: b.y, ownerId: p.id });
-              dead = true;
-              break;
-            }
-            if (p.shield) {
-              // 护盾挡下这一发：整发伤害被免疫，护盾消耗掉，子弹消失，但坦克本身不掉血
-              p.shield = false;
-            } else {
-              // 固定 1 点伤害：血量归零才真正阵亡，否则继续以残血留在场上。
-              // 命中信息记下来，稍后广播，客户端据此播放受击火花、掉血数字和车身闪白。
-              p.hp = Math.max(0, p.hp - BULLET_DAMAGE);
-              if (p.hp <= 0) {
-                p.alive = false;
-                p.lastHitBy = b.owner;
-                if (hasRespawn(this.mode)) {
-                  // 大乱斗 / 占点 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，
-                  // 由 updateRespawns 放回场上。
-                  p.respawnRemaining = BRAWL_RESPAWN_DELAY;
-                  // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
-                  p.input = { forward: false, backward: false, left: false, right: false, shoot: false };
-                  // 击杀统计：自己打自己（跳弹命中自己）不计分；
-                  // 已经阵亡的击杀者生前打出的子弹仍然算他的击杀。
-                  // 占点模式的 score 是"占领次数"，击杀不直接得分，所以这里只给
-                  // 大乱斗 / 团队模式累计击杀分。
-                  if (this.mode === 'brawl' || this.mode === 'team') {
-                    const killer = this.players.get(b.owner);
-                    if (killer && killer.id !== p.id) killer.score += 1;
-                    // 团队总分独立累计：只统计跨队击杀，自杀不计。
-                    // 击杀者中途离场时用子弹上记录的 team，保证这一分仍归原队伍。
-                    if (this.mode === 'team') {
-                      const killerTeam = (killer && killer.team) || b.team || null;
-                      if (killerTeam && p.team && killerTeam !== p.team) {
-                        this.teamKills[killerTeam] += 1;
-                      }
-                    }
-                  }
-                }
-              }
-              damageHits.push({
-                playerId: p.id,
-                by: b.owner,
-                x: b.x,
-                y: b.y,
-                hp: p.hp,
-                dead: !p.alive,
-              });
-            }
+            // 统一的命中结算：出生保护吸收 / 护盾抵消 / 扣血 + 击杀计分都在 applyHit 里。
+            // 子弹无论是否造成伤害都会消失，所以结算完直接置 dead。
+            this.applyHit(p, b.owner, bulletTeam, b.x, b.y, BULLET_DAMAGE, damageHits, spawnBlocks);
             dead = true;
             break;
           }
@@ -940,20 +965,41 @@ class Room {
       }
     }
 
-    // --- 私发弹药 ---
+    // --- 私发弹药 + 激光预览 ---
     // 弹药是个人资源，绝不放进公共 state：每个玩家只收到自己那一份，
     // "只能看到自己的弹药"是协议层面的保证，而不是靠客户端自觉隐藏。
-    // 放在 state 之前发送，客户端处理 state 触发重绘时拿到的就是最新弹药。
+    // 激光就绪时顺便把这条反弹路径私发给本人，客户端用虚线画在车下；
+    // 其他玩家收不到，避免提前暴露瞄准线。
+    // 放在 state 之前发送，客户端处理 state 触发重绘时拿到的就是最新数据。
     for (const p of this.players.values()) {
-      if (!p.ws || p.ws.readyState !== WebSocket.OPEN) continue;
-      p.ws.send(JSON.stringify({
+      if (!p.ws || p.ws.readyState !== WebSocket.OPEN) {
+        p.ammoPickupGain = 0; // 掉线时没发出去的补充量不保留，避免重连后误报
+        continue;
+      }
+      const msg = {
         type: 'ammo',
         ammo: p.ammo,
         max: AMMO_MAX,
         reload: p.ammo < AMMO_MAX
           ? Math.round((p.ammoReloadAcc / AMMO_REGEN_INTERVAL) * 100) / 100
           : 0,
-      }));
+        // 本帧拾取弹药箱实际补了几发；没拾取时为 0。只发本人，不进入公共 state。
+        pickup: p.ammoPickupGain,
+        laserPreview: null,
+      };
+      // 死亡 / 凝聚动画中不显示预览；预览与真正发射使用同一套炮口偏移和反弹参数。
+      if (p.laserReady && p.alive && p.spawnAnimRemaining <= 0) {
+        const preview = traceLaserPath(
+          p.x + Math.cos(p.angle) * LASER_MUZZLE_OFFSET,
+          p.y + Math.sin(p.angle) * LASER_MUZZLE_OFFSET,
+          p.angle,
+          this.maze.rects,
+          { length: LASER_LENGTH, maxBounces: LASER_MAX_BOUNCES }
+        );
+        msg.laserPreview = preview.points;
+      }
+      p.ws.send(JSON.stringify(msg));
+      p.ammoPickupGain = 0;
     }
 
     // --- 广播状态 ---
@@ -1074,12 +1120,72 @@ class Room {
     p.speedBoostRemaining = 0;
     p.tripleReady = false;
     p.homingReady = false;
+    p.laserReady = false;
     p.invisibleRemaining = 0;
     p.ammo = AMMO_MAX;
     p.ammoReloadAcc = 0;
+    p.ammoPickupGain = 0;
     p.spawnProtectRemaining = SPAWN_PROTECT_TIME;
     p.spawnAnimRemaining = SPAWN_MATERIALIZE_TIME;
     p.respawnRemaining = 0;
+  }
+
+  // 统一的命中结算：子弹和激光共用。
+  // 返回 true 表示真正扣了血；出生保护/护盾挡下时返回 false。
+  // 调用方自己决定命中后弹体是否继续：子弹会消失，激光会穿透继续结算后面的敌人。
+  applyHit(target, ownerId, ownerTeam, hitX, hitY, damage, damageHits, spawnBlocks) {
+    if (target.spawnProtectRemaining > 0) {
+      // 出生保护：这一下被吸收，不掉血、不消耗道具护盾；
+      // 记下命中位置，稍后广播给客户端播放格挡火花。
+      spawnBlocks.push({ x: hitX, y: hitY, ownerId: target.id });
+      return false;
+    }
+    if (target.shield) {
+      // 护盾挡下这一下：伤害被免疫，护盾消耗掉，坦克本身不掉血。
+      target.shield = false;
+      return false;
+    }
+
+    // 固定 1 点伤害：血量归零才真正阵亡，否则继续以残血留在场上。
+    // 命中信息记下来，稍后广播，客户端据此播放受击火花、掉血数字和车身闪白。
+    const amount = damage == null ? BULLET_DAMAGE : damage;
+    target.hp = Math.max(0, target.hp - amount);
+    if (target.hp <= 0) {
+      target.alive = false;
+      target.lastHitBy = ownerId;
+      if (hasRespawn(this.mode)) {
+        // 大乱斗 / 占点 / 团队模式里阵亡不是退场：开始 10 秒复活倒计时，
+        // 由 updateRespawns 放回场上。
+        target.respawnRemaining = BRAWL_RESPAWN_DELAY;
+        // 死亡瞬间清空输入，避免复活时还带着死前按住的方向/开火。
+        target.input = { forward: false, backward: false, left: false, right: false, shoot: false };
+        // 击杀统计：自己打自己（跳弹命中自己）不计分；
+        // 已经阵亡的击杀者生前打出的子弹仍然算他的击杀。
+        // 占点模式的 score 是"占领次数"，击杀不直接得分，所以这里只给
+        // 大乱斗 / 团队模式累计击杀分。
+        if (this.mode === 'brawl' || this.mode === 'team') {
+          const killer = this.players.get(ownerId);
+          if (killer && killer.id !== target.id) killer.score += 1;
+          // 团队总分独立累计：只统计跨队击杀，自杀不计。
+          // 击杀者中途离场时用弹体上记录的 team，保证这一分仍归原队伍。
+          if (this.mode === 'team') {
+            const killerTeam = (killer && killer.team) || ownerTeam || null;
+            if (killerTeam && target.team && killerTeam !== target.team) {
+              this.teamKills[killerTeam] += 1;
+            }
+          }
+        }
+      }
+    }
+    damageHits.push({
+      playerId: target.id,
+      by: ownerId,
+      x: hitX,
+      y: hitY,
+      hp: target.hp,
+      dead: !target.alive,
+    });
+    return true;
   }
 
   moveTankAxis(p, dx, dy) {
@@ -1826,10 +1932,15 @@ module.exports = {
   BULLET_RADIUS,
   AMMO_MAX,
   AMMO_REGEN_INTERVAL,
+  AMMO_REFILL,
   DEFAULT_MAX_HP,
   MIN_MAX_HP,
   MAX_MAX_HP,
   BULLET_DAMAGE,
   REPAIR_HEAL,
   ITEM_TYPES,
+  LASER_LENGTH,
+  LASER_MAX_BOUNCES,
+  LASER_HALF_WIDTH,
+  LASER_DAMAGE,
 };

@@ -6,9 +6,10 @@
 //   3. 0 弹时开火无效：不出弹、不解除出生保护；
 //   4. 每 5 秒自动补 1 发，上限 5 发，满弹不囤积进度；
 //   5. 阵亡后停止回复；
-//   6. 三连发按 3 发结算，弹药不足 3 发时整发打不出去且道具保持就绪；
+//   6. 三连发一次打出 3 颗子弹，只消耗 1 发弹药；0 弹时打不出去且道具保持就绪；
 //   7. 弹药只私发给本人，公共 state 里不带弹药字段；
-//   8. 新回合重新满弹。
+//   8. 新回合重新满弹；
+//   9. 弹药箱：拾取后补满、满弹仍会拾取、补充量只私发本人。
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,6 +17,8 @@ const {
   Room,
   AMMO_MAX,
   AMMO_REGEN_INTERVAL,
+  AMMO_REFILL,
+  ITEM_TYPES,
 } = require('../server');
 
 const DT = 1 / 30;
@@ -204,33 +207,44 @@ test('阵亡后停止回复弹药', () => {
   }
 });
 
-test('三连发按 3 发结算；不足 3 发时打不出去、道具保持就绪', () => {
+test('三连发一次打出 3 颗子弹，只消耗 1 发弹药；0 弹时打不出去、道具保持就绪', () => {
   const { room } = makeRoom(2);
   try {
     const [a] = [...room.players.values()];
     a.spawnProtectRemaining = 0;
 
-    // 5 发满弹 + 三连发：一次打 3 颗子弹，扣 3 发
+    // 5 发满弹 + 三连发：一次打 3 颗子弹，只扣 1 发
     a.ammo = 5;
     a.tripleReady = true;
     readyToShoot(a);
     const beforeTripleId = room.nextBulletId;
     room.tick();
 
-    assert.equal(a.ammo, 2, `三连发后弹药应为 2: ${a.ammo}`);
+    assert.equal(a.ammo, 4, `三连发后弹药应为 4: ${a.ammo}`);
     assert.equal(room.nextBulletId - beforeTripleId, 3, '三连发应打出 3 颗子弹');
     assert.equal(a.tripleReady, false, '三连发道具应被消耗');
 
-    // 只有 2 发时再拿一个三连发：整发打不出去，道具保持就绪
-    a.ammo = 2;
+    // 只有 1 发时也能打出三连发，打完变 0
+    a.ammo = 1;
+    a.tripleReady = true;
+    readyToShoot(a);
+    const beforeLastId = room.nextBulletId;
+    room.tick();
+
+    assert.equal(a.ammo, 0, '1 发弹药应足够打出三连发');
+    assert.equal(room.nextBulletId - beforeLastId, 3);
+    assert.equal(a.tripleReady, false);
+
+    // 0 弹时整发打不出去，道具保持就绪
+    a.ammo = 0;
     a.tripleReady = true;
     readyToShoot(a);
     const beforeBlockedId = room.nextBulletId;
     room.tick();
 
-    assert.equal(room.nextBulletId, beforeBlockedId, '弹药不足 3 发时不应出弹');
-    assert.equal(a.ammo, 2, '打不出去时不应扣弹药');
-    assert.equal(a.tripleReady, true, '三连发道具应保持就绪，等弹药够了再用');
+    assert.equal(room.nextBulletId, beforeBlockedId, '0 弹时不应出弹');
+    assert.equal(a.ammo, 0, '打不出去时不应扣弹药');
+    assert.equal(a.tripleReady, true, '三连发道具应保持就绪，等装填够了再用');
   } finally {
     room.stopTicking();
   }
@@ -287,6 +301,74 @@ test('装填进度：满弹时 ammo 消息里的 reload 为 0', () => {
   try {
     room.tick();
     assert.equal(lastAmmoMsg(sockets[0]).reload, 0);
+  } finally {
+    room.stopTicking();
+  }
+});
+
+test('道具池包含弹药箱，补充常量与上限一致', () => {
+  assert.ok(ITEM_TYPES.includes('ammo'), '道具池里应该有弹药箱');
+  assert.equal(AMMO_REFILL, AMMO_MAX, '弹药箱应一次补满');
+});
+
+test('弹药箱：拾取后补满，补充量只私发本人且公共广播不泄露', () => {
+  const { room, sockets } = makeRoom(2);
+  try {
+    const [a, b] = [...room.players.values()];
+    a.ammo = 2;
+    a.ammoReloadAcc = 2.4;
+    b.ammo = 4;
+
+    room.items.push({ id: 1, type: 'ammo', x: a.x, y: a.y, cellR: 0, cellC: 0 });
+    room.itemSpawnAcc = 0; // 避免这一次 tick 额外刷新道具干扰断言
+    room.tick();
+
+    assert.equal(a.ammo, AMMO_MAX, '弹药箱应直接把弹药补满');
+    assert.equal(a.ammoReloadAcc, 0, '补满后装填进度应归零');
+    assert.equal(room.items.length, 0, '弹药箱应被拾取');
+
+    const pickup = sockets[0].messages.filter((m) => m.type === 'item_pickup').pop();
+    assert.ok(pickup, '应广播道具拾取');
+    assert.equal(pickup.pickups[0].type, 'ammo');
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(pickup.pickups[0], 'pickup'),
+      '公共 item_pickup 不应携带补充量'
+    );
+
+    const ammoA = lastAmmoMsg(sockets[0]);
+    assert.equal(ammoA.ammo, AMMO_MAX, '本人应看到补满后的弹药');
+    assert.equal(ammoA.pickup, 3, '本人应收到本次实际补充量 3');
+
+    const ammoB = lastAmmoMsg(sockets[1]);
+    assert.equal(ammoB.ammo, 4, '其他人弹药不应变化');
+    assert.equal(ammoB.pickup, 0, '其他人不应收到别人的补充量');
+
+    // 4 发时再捡一个：只补 1 发，不超过上限
+    room.items.push({ id: 2, type: 'ammo', x: b.x, y: b.y, cellR: 0, cellC: 0 });
+    room.tick();
+    assert.equal(b.ammo, AMMO_MAX, '4 发时拾取应补到上限');
+    assert.equal(lastAmmoMsg(sockets[1]).pickup, 1, '实际只补充了 1 发');
+  } finally {
+    room.stopTicking();
+  }
+});
+
+test('弹药箱：满弹时仍会拾取并消失，实际补充为 0', () => {
+  const { room, sockets } = makeRoom(2);
+  try {
+    const [a] = [...room.players.values()];
+    a.ammo = AMMO_MAX;
+
+    room.items.push({ id: 1, type: 'ammo', x: a.x, y: a.y, cellR: 0, cellC: 0 });
+    room.itemSpawnAcc = 0;
+    room.tick();
+
+    assert.equal(room.items.length, 0, '满弹时弹药箱仍应被拾取');
+    assert.equal(a.ammo, AMMO_MAX, '满弹拾取不应超过上限');
+
+    const pickup = sockets[0].messages.filter((m) => m.type === 'item_pickup').pop();
+    assert.equal(pickup.pickups[0].type, 'ammo', '满弹拾取也应广播 item_pickup');
+    assert.equal(lastAmmoMsg(sockets[0]).pickup, 0, '满弹时实际补充量应为 0');
   } finally {
     room.stopTicking();
   }

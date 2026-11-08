@@ -146,10 +146,12 @@
   let explosions = []; // 死亡爆炸特效：{x, y, color, startTime}
   let trails = []; // 加速拖尾粒子：{x, y, start}
   let spawnBlockFx = []; // 出生保护格挡火花：{x, y, start}
+  let laserFx = []; // 激光光束特效：{points, hits, start}，只活一小段时间
+  let laserPreview = null; // 激光就绪时服务端私发的预览折线（只有自己收得到）
   let prevPos = {}; // id -> 上一帧坐标 {x, y}，用来算加速拖尾的运动方向
   let prevShield = {}; // id -> 上一帧是否有护盾，用来检测"护盾刚被打破"这一瞬间
-  const ITEM_COLORS = { shield: '#3A86FF', speed: '#FFD60A', triple: '#E63946', homing: '#B565D8', invisible: '#8FBDB6', repair: '#2ECC71' };
-  const ITEM_GLYPHS = { shield: '盾', speed: '速', triple: '三', homing: '追', invisible: '隐', repair: '修' };
+  const ITEM_COLORS = { shield: '#3A86FF', speed: '#FFD60A', triple: '#E63946', homing: '#B565D8', invisible: '#8FBDB6', repair: '#2ECC71', laser: '#00E5FF', ammo: '#FF8C1A' };
+  const ITEM_GLYPHS = { shield: '盾', speed: '速', triple: '三', homing: '追', invisible: '隐', repair: '修', laser: '光', ammo: '弹' };
   // 与服务端 MAP_PRESETS 一一对应：这里只用 key 发请求、用尺寸做展示文案，
   // 真正的行列数以服务端开局广播的 game_start 为准。
   const MAP_OPTIONS = [
@@ -529,6 +531,8 @@
         explosions = [];
         trails = [];
         spawnBlockFx = [];
+        laserFx = [];
+        laserPreview = null;
         hitSparks = [];
         floatTexts = [];
         hitFlash = {};
@@ -559,9 +563,16 @@
       case 'ammo':
         // 服务端每 tick 只私发本人的弹药，不触发重绘——
         // 紧接着到达的 state 消息会统一 draw()，那时用的就是这里刚更新的值。
+        // 激光就绪时这条消息还带 laserPreview（反弹路径折线）；没就绪/已发射时为 null。
         myAmmo = msg.ammo;
         myAmmoMax = msg.max || AMMO_MAX;
         myAmmoReload = msg.reload || 0;
+        laserPreview = Array.isArray(msg.laserPreview) ? msg.laserPreview : null;
+        // 弹药箱：服务端只把本次实际补充量私发给本人；满弹时补充量为 0，不飘字。
+        if (msg.pickup > 0) {
+          const self = tanks.find((t) => t.id === myId);
+          if (self) spawnFloatText(self.x, self.y - 30, `+${msg.pickup} 弹药`, ITEM_COLORS.ammo);
+        }
         break;
 
       case 'state': {
@@ -612,6 +623,15 @@
         (msg.blocks || []).forEach((b) => spawnBlockFx.push({ x: b.x, y: b.y, start: performance.now() }));
         break;
 
+      case 'laser':
+        // 激光：服务端已经把整条反弹折线算好了，这里只负责播一次渐隐特效。
+        laserFx.push({
+          points: msg.points || [],
+          hits: msg.hits || [],
+          start: performance.now(),
+        });
+        break;
+
       case 'damage':
         // 真正掉血：车身闪白 + 命中点火花 + 飘一个 -1
         (msg.hits || []).forEach((h) => {
@@ -622,7 +642,7 @@
         break;
 
       case 'item_pickup':
-        // 维修包回血：在坦克上方飘一个绿色 +1；满血捡包时 heal 为 0，不飘字
+        // 维修包回血：在坦克上方飘一个绿色 +1；满血捡包时 heal 为 0，不飘字。
         (msg.pickups || []).forEach((p) => {
           if (p.type !== 'repair' || !p.heal) return;
           const tank = tanks.find((t) => t.id === p.playerId);
@@ -1546,50 +1566,44 @@
   }
 
   // ---------- 占点模式的据点 ----------
-  // 圈允许跨墙，所以画在墙体之上，避免进度弧被迷宫墙遮掉一截。
-  // 只有三样东西：极淡的圈内底色 + 一圈实线边界 + 同半径的进度弧。
-  // 不发光、不铺满底盘、不画中心菱形——据点只需要回答"圈在哪"和"谁占了多少"。
-  // 进度和边界同半径，所以整张图永远只有一圈，不会出现内外双环打架。
-  // 据点本体统一用白色（中立物件，不属于任何队伍）；争夺时改成虚线，
-  // 用"断裂 / 卡住"的形态表达，避免再引入第二种高饱和颜色和玩家的车色打架。
+  // 画在地板之上、迷宫墙之下：压在墙上的那一段圆环会被墙盖住，据点看起来是"埋"在场景里，
+  // 而不是浮在所有东西最上层。圈本身仍然允许跨墙，只是被墙切断的那截不可见。
+  // 一圈搞定，不再分内外：灰色圆槽常驻（圈在哪、还剩多少空间），
+  // 进度条同半径、同宽直接压在槽上（谁占了多少）。槽用偏暗的灰而不是浅灰，
+  // 这样任何车色压在槽上都比槽亮，灰色玩家（10 号）的进度条也不会和槽糊在一起。
+  // 槽是实色而不是半透明，保证跨墙时颜色一致，圆圈不会因为压到迷宫墙而断掉。
+  // 争夺状态只由服务端冻结进度，这里不做任何额外样式变化（不换色、不改虚线）。
   const POINT_COLOR = '#F2FBF9';
-  const POINT_RING_WIDTH = 3;
-  const POINT_PROGRESS_WIDTH = 6;
-  const POINT_CONTESTED_DASH = [9, 7];
+  const POINT_SLOT_COLOR = '#5C6863';
+  const POINT_SLOT_WIDTH = 6;
 
   function drawCapturePoint() {
     if (!isCaptureMode() || !capturePoint) return;
     const { x, y, radius, progress } = capturePoint;
-    const contested = capturePoint.status === 'contested';
-    const stateColor = POINT_COLOR;
-    // 进度弧用占领者颜色：圈是中立的，但"谁在占"必须一眼看出来。
-    const ownerColor = capturePoint.ownerColor || stateColor;
+    // 进度条用占领者颜色：圈是中立的，但"谁在占"必须一眼看出来。
+    const ownerColor = capturePoint.ownerColor || POINT_COLOR;
     ctx.save();
 
-    // 圈内极淡底色：只用来快速分辨"圈里 / 圈外"，透明度低到不会压住坦克和子弹
-    ctx.globalAlpha = 0.07;
-    ctx.fillStyle = stateColor;
+    // 槽内极淡底色：只用来快速分辨"圈里 / 圈外"，透明度低到不会压住坦克和子弹
+    ctx.globalAlpha = 0.05;
+    ctx.fillStyle = POINT_SLOT_COLOR;
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
 
-    // 边界：实线 3px，保证第一眼就能在迷宫里找到据点，又不至于像一堵墙
-    ctx.globalAlpha = contested ? 0.95 : 0.9;
-    ctx.strokeStyle = stateColor;
-    ctx.lineWidth = POINT_RING_WIDTH;
-    // 争夺时整圈变成虚线：进度被冻住，形态也跟着"断开"
-    ctx.setLineDash(contested ? POINT_CONTESTED_DASH : []);
+    // 灰槽：常驻的一圈轨道，空圈时它就是据点的全部信息
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = POINT_SLOT_COLOR;
+    ctx.lineWidth = POINT_SLOT_WIDTH;
     ctx.beginPath();
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.setLineDash([]);
 
-    // 进度：和边界同半径的粗弧，从 12 点方向顺时针填充，颜色 = 占领者。
-    // 争夺时进度冻住，弧线压暗，用"卡住了"的观感代替额外的图标或文字。
+    // 进度条：和槽完全重合（同半径、同线宽），从 12 点方向顺时针把槽填满。
+    // 争夺时只是不再增长，形状和颜色都不变。
     if (progress > 0) {
-      ctx.globalAlpha = contested ? 0.35 : 1;
       ctx.strokeStyle = ownerColor;
-      ctx.lineWidth = POINT_PROGRESS_WIDTH;
+      ctx.lineWidth = POINT_SLOT_WIDTH;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.arc(x, y, radius, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
@@ -1713,6 +1727,17 @@
       ctx.lineWidth = 2;
       ctx.fillRect(-5, -5, 10, 10);
       ctx.strokeRect(-5, -5, 10, 10);
+      ctx.restore();
+    } else if (t.alive && t.laserReady) {
+      // 激光就绪：炮口前端加一个青色发射器标记（竖直发光块），
+      // 直观对应"下一发会射出一条反弹射线"；三者互斥，用完立刻消失。
+      ctx.save();
+      ctx.translate(19, 0);
+      ctx.fillStyle = ITEM_COLORS.laser;
+      ctx.strokeStyle = '#06110F';
+      ctx.lineWidth = 2;
+      ctx.fillRect(-2, -7, 5, 14);
+      ctx.strokeRect(-2, -7, 5, 14);
       ctx.restore();
     }
 
@@ -1964,6 +1989,56 @@
     });
   }
 
+  // ---------- 激光光束 ----------
+  // 服务端在发射的同一 tick 广播一次激光折线；这里用 0.35 秒把它画成
+  // "外层青色辉光 + 内层白色芯线"并整体淡出，命中点补一圈小光晕。
+  const LASER_FX_DURATION = 350; // ms
+  const LASER_GLOW_WIDTH = 9;
+  const LASER_CORE_WIDTH = 2.5;
+
+  function strokeLaserPath(points) {
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+  }
+
+  function drawLasers(now) {
+    laserFx = laserFx.filter((e) => now - e.start < LASER_FX_DURATION);
+    laserFx.forEach((e) => {
+      const t = (now - e.start) / LASER_FX_DURATION; // 0..1
+      const alpha = Math.max(0, 1 - t);
+      const points = e.points || [];
+      if (points.length < 2) return;
+
+      ctx.save();
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      // 外层辉光：宽、透明度低；用 lighter 让它在深色地面上更像"发光"
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * 0.35;
+      ctx.strokeStyle = ITEM_COLORS.laser;
+      ctx.lineWidth = LASER_GLOW_WIDTH;
+      strokeLaserPath(points);
+
+      // 内层白色芯线：细、亮，保证任何背景上都看得清路径
+      ctx.globalAlpha = alpha * 0.95;
+      ctx.strokeStyle = '#F2FBF9';
+      ctx.lineWidth = LASER_CORE_WIDTH;
+      strokeLaserPath(points);
+
+      // 命中点小光晕：和 damage 的黄色火花叠加时不会打架
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.fillStyle = ITEM_COLORS.laser;
+      (e.hits || []).forEach((h) => {
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, 5 + 6 * t, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+    });
+  }
+
   // ---------- 受击火花 / 掉血飘字 ----------
   // 服务端把真正掉血的命中点广播成 damage，这里画几颗短促的黄色火花并飘一个 -1；
   // 死亡爆炸仍然由 detectDeaths 负责，两者互不冲突。
@@ -2097,18 +2172,52 @@
     });
   }
 
+  // ---------- 激光路径预览 ----------
+  // 只有自己手里有激光时，服务端才会在 ammo 消息里私发这条折线；
+  // 用虚线画在坦克/子弹下面，发射前就能看到反弹后的整条路径。
+  // 预览不参与命中判定，开火后服务端下一帧会把它置空，虚线立即消失。
+  function drawLaserPreview() {
+    if (spectating) return;
+    const self = tanks.find((t) => t.id === myId);
+    if (!self || !self.alive || !self.laserReady) return;
+    const points = laserPreview;
+    if (!points || points.length < 2) return;
+
+    ctx.save();
+    ctx.strokeStyle = ITEM_COLORS.laser;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.65;
+    ctx.setLineDash([7, 7]);
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 终点小圆点：提示固定长度会在哪里耗尽
+    const end = points[points.length - 1];
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = ITEM_COLORS.laser;
+    ctx.beginPath();
+    ctx.arc(end.x, end.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   function draw() {
     const now = performance.now();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#1B4B43';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawCapturePoint(); // 压在地板之上、迷宫墙之下：墙体挡住的那一截会被墙盖住
     drawMaze();
-    drawCapturePoint();
     drawItems();
+    drawLaserPreview();
     drawTrails(now);
     tanks.forEach((t) => drawTank(t, now));
     bullets.forEach(drawBullet);
-    drawAmmoBadge(); // 画在子弹之上，贴边时也不会被飞过的子弹盖住
+    drawLasers(now);
+    drawAmmoBadge(); // 画在子弹/激光之上，贴边时也不会被飞过的弹体盖住
     drawExplosions(now);
     drawShieldBreaks(now);
     drawSpawnBlocks(now);
