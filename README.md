@@ -69,6 +69,7 @@ capture.js      占点模式：据点生成与进度状态机
 laser.js        激光路径与命中计算
 public/         前端页面、样式与 Canvas 渲染
 public/vision.js 暗黑模式视野：射线求交、墙体遮挡与可见多边形
+public/camera.js 视野跟随：固定 720×480 世界视口与画布变换
 tests/          单元测试与 WebSocket 端到端测试
 ```
 

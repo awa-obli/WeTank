@@ -607,6 +607,7 @@
         prevAlive = {};
         prevShield = {};
         prevPos = {};
+        resetFollowCamera(); // 新回合从"直接跟随新坦克"开始，不做上一局遗留下来的过渡
         // 新回合满弹：先按本地默认值重置，服务端第一帧 ammo 消息会立刻覆盖
         myAmmo = AMMO_MAX;
         myAmmoMax = AMMO_MAX;
@@ -657,6 +658,7 @@
         detectDeaths(msg.tanks);
         updateSpeedTrails(msg.tanks);
         tanks = msg.tanks;
+        trackSelfAlive(); // 记录自己刚阵亡/刚复活的时刻，供镜头切换用
         msg.tanks.forEach((t) => { lastHp[t.id] = t.hp; });
         bullets = msg.bullets;
         items = msg.items || [];
@@ -1883,7 +1885,29 @@
     ctx.restore();
   }
 
-  function drawTank(t, now) {
+  // 车身上方的状态文字：分段血条 + 昵称。向上放不下时整体挪到车下。
+  // 单独抽出来，暗黑遮罩画完后会再调用一次，把自己的昵称/血量盖回黑幕之上。
+  function drawTankLabel(t) {
+    ctx.save();
+    // 自己隐身时，自己的名字和血条也跟着车身一起半透明
+    if (t.invisible && t.id === myId) ctx.globalAlpha *= SELF_INVISIBLE_ALPHA;
+    ctx.fillStyle = '#F2FBF9';
+    ctx.font = '600 13px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    // 血条紧贴车身上沿，名字再往上一点。坦克可以贴着地图边缘移动，
+    // 上方空间不够时（名字会顶出 canvas）就把"血条+名字"整体挪到坦克下方，
+    // 两者不会互相压住，也不会被裁掉。
+    const belowLabel = t.y - 29 < LABEL_TOP_PAD;
+    drawHpBar(t, belowLabel ? t.y + 20 : t.y - 22);
+
+    const textWidth = ctx.measureText(t.name).width;
+    const labelX = clampNum(t.x, textWidth / 2 + LABEL_PAD, canvas.width - textWidth / 2 - LABEL_PAD);
+    const labelY = clampNum(belowLabel ? t.y + 40 : t.y - 29, LABEL_TOP_PAD, canvas.height - LABEL_PAD);
+    ctx.fillText(t.name, labelX, labelY);
+    ctx.restore();
+  }
+
+  function drawTank(t, now, skipLabel = false) {
     const isSelf = t.id === myId;
     // 阵亡后不画任何残影：车体直接消失，只留死亡爆炸特效
     if (!t.alive) return;
@@ -2021,20 +2045,10 @@
         ctx.restore();
       }
 
-      ctx.fillStyle = '#F2FBF9';
-      ctx.font = '600 13px Inter, sans-serif';
-      ctx.textAlign = 'center';
-      // 血条紧贴车身上沿，名字再往上一点。坦克可以贴着地图边缘移动，
-      // 上方空间不够时（名字会顶出 canvas）就把"血条+名字"整体挪到坦克下方，
-      // 两者不会互相压住，也不会被裁掉。
-      const belowLabel = t.y - 29 < LABEL_TOP_PAD;
-      drawHpBar(t, belowLabel ? t.y + 20 : t.y - 22);
-
-      const textWidth = ctx.measureText(t.name).width;
-      const labelX = clampNum(t.x, textWidth / 2 + LABEL_PAD, canvas.width - textWidth / 2 - LABEL_PAD);
-      const labelY = clampNum(belowLabel ? t.y + 40 : t.y - 29, LABEL_TOP_PAD, canvas.height - LABEL_PAD);
-      ctx.fillText(t.name, labelX, labelY);
       ctx.restore();
+
+      // 暗黑模式下自己的标签延后到黑幕之后单独画（见 drawSelfStatus），避免被涂黑
+      if (!skipLabel) drawTankLabel(t);
     }
   }
 
@@ -2099,6 +2113,18 @@
       ctx.fillRect(barX, barY, barW * clampNum(myAmmoReload, 0, 1), 2.5);
     }
     ctx.restore();
+  }
+
+  // 暗黑模式下把自己的昵称、分段血条、弹药面板补画在黑幕之上。
+  // 这三样是操作必需的信息，但都画在世界坐标里：昵称/血条可能被贴身的墙挡进阴影，
+  // 弹药角标挂在车身侧面、本来就有一部分超出 60px 近身圈，背对时会被涂黑。
+  // 其他玩家的名字和血条仍然照常被视野遮挡，只有自己这一份永远可见。
+  function drawSelfStatus() {
+    if (spectating) return;
+    const self = tanks.find((t) => t.id === myId);
+    if (!self || !self.alive || self.spawnAnim > 0) return;
+    drawTankLabel(self);
+    drawAmmoBadge();
   }
 
   function drawBullet(b) {
@@ -2490,12 +2516,12 @@
   }
 
   // ---------- 暗黑模式：视野遮罩 ----------
-  // 视野形状 = 面朝 90° 扇形（最远 360px）+ 近身 60px 小圈，先把理想形状的每条边缘
+  // 视野形状 = 面朝 90° 扇形（最远 320px）+ 近身 60px 小圈，先把理想形状的每条边缘
   // 向外羽化（边界外 12px 内渐入），再用每堵墙的阴影多边形把墙后硬切成全黑。
   // 这样扇形/近身圈在撞到墙之前一直保持羽化，墙后是硬边；墙体自身不会被羽化。
   // 观战者不受影响（看全图），自己阵亡时画面全黑、复活后恢复。
   const DARK_FOV = (90 * Math.PI) / 180;
-  const DARK_RANGE = 360;
+  const DARK_RANGE = 320;
   const DARK_NEAR_RADIUS = 60;
   const DARK_FEATHER = 12;       // 向外羽化的距离（px）
   const DARK_FEATHER_STEPS = 20; // 羽化分层数：每层一次多边形填充，越多越平滑
@@ -2580,21 +2606,100 @@
     ctx.drawImage(darkMaskCanvas, 0, 0);
   }
 
+  // ---------- 视野跟随 ----------
+  // 视口固定 720×480 世界像素（9×6 格，正好等于最小档地图，见 camera.js）：
+  // 不管屏幕/地图多大，所有玩家看到的世界范围一致；画面中心始终跟着自己的坦克走，
+  // 贴到地图边缘时视口夹紧、坦克会离开画面中心。
+  // 阵亡后先保持跟随视角 2 秒（镜头停在阵亡位置），再用过渡动画拉远到整张地图；
+  // 复活时再用过渡动画推回坦克。观战者没有坦克，始终看全图。
+  // 这个机制没有开关：所有对局固定使用跟随视野。
+  const DEATH_FULL_VIEW_DELAY = 2000; // 阵亡后保持跟随视角的时长（ms）
+  const DEATH_ZOOM_OUT_MS = 600;      // 阵亡 → 全图的过渡时长
+  const RESPAWN_ZOOM_IN_MS = 500;     // 复活 → 跟随的过渡时长
+  let selfDeadSince = null;   // 自己阵亡的时刻（performance.now()），活着时为 null
+  let selfAlivePrev = null;   // 上一帧自己是否存活，用来检测"刚阵亡 / 刚复活"
+  let cameraMode = null;      // 'follow' | 'full'：模式变化时启动过渡动画
+  let cameraTransition = null; // { from, start, duration }：视口矩形插值过渡
+  let lastCameraView = null;   // 上一帧实际使用的视口，作为下一次过渡的起点
+
+  // 自己存活状态变化：刚阵亡记下时刻（2 秒后才拉远到全图），刚复活清掉。
+  // 状态消息 30Hz 推送，所以这里的"阵亡时刻"最多晚 33ms，可以忽略。
+  function trackSelfAlive() {
+    const self = tanks.find((t) => t.id === myId);
+    const alive = !!(self && self.alive);
+    if (selfAlivePrev === true && !alive) selfDeadSince = performance.now();
+    else if (selfAlivePrev === false && alive) selfDeadSince = null;
+    selfAlivePrev = alive;
+  }
+
+  // 新回合 / 重连时清空相机状态，让第一帧直接贴到坦克上（不做过渡）。
+  function resetFollowCamera() {
+    selfDeadSince = null;
+    selfAlivePrev = null;
+    cameraMode = null;
+    cameraTransition = null;
+    lastCameraView = null;
+  }
+
+  // 本帧应该用哪种视角。view 是视口矩形：跟随 = 720×480，全图 = 整个世界。
+  // 阵亡后坦克仍然留在 tanks 里（alive=false），所以前 2 秒镜头停在阵亡位置。
+  function desiredCamera(now) {
+    const self = tanks.find((t) => t.id === myId);
+    if (spectating || !self) return { mode: 'full', view: TankCamera.fullView(worldW, worldH) };
+    if (!self.alive && selfDeadSince !== null && now - selfDeadSince >= DEATH_FULL_VIEW_DELAY) {
+      return { mode: 'full', view: TankCamera.fullView(worldW, worldH) };
+    }
+    return { mode: 'follow', view: TankCamera.computeView(self.x, self.y, worldW, worldH) };
+  }
+
   function draw() {
     const now = performance.now();
+    // 每帧先把画布变换复位：上一帧可能留下了视野跟随的相机变换。
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#1B4B43';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 视野跟随：把视口铺满整个画布，之后所有世界坐标绘制都自动跟着走
+    // （包括最后画的暗黑遮罩——它也是按世界坐标画的，同一个变换会把两者对齐）。
+    // 正常移动时视口直接贴着坦克，不做平滑（坦克始终在画面中心）；
+    // 只在"阵亡 → 全图"和"复活 → 跟随"这两个模式切换时，对视口矩形做缓入缓出的插值缩放。
+    const desired = desiredCamera(now);
+    if (desired.mode !== cameraMode) {
+      if (cameraMode !== null && lastCameraView) {
+        cameraTransition = {
+          from: { ...lastCameraView },
+          start: now,
+          duration: desired.mode === 'full' ? DEATH_ZOOM_OUT_MS : RESPAWN_ZOOM_IN_MS,
+        };
+      } else {
+        cameraTransition = null; // 第一帧 / 新回合：直接到位，不做过渡
+      }
+      cameraMode = desired.mode;
+    }
+    let view = desired.view;
+    if (cameraTransition) {
+      const p = clampNum((now - cameraTransition.start) / cameraTransition.duration, 0, 1);
+      view = TankCamera.lerpView(cameraTransition.from, view, TankCamera.easeInOutCubic(p));
+      if (p >= 1) cameraTransition = null;
+    }
+    lastCameraView = view;
+
+    const camera = TankCamera.computeTransform(view, canvas.width, canvas.height);
+    ctx.setTransform(camera.scale, 0, 0, camera.scale, camera.tx, camera.ty);
+
     drawCapturePoint(); // 压在地板之上、迷宫墙之下：墙体挡住的那一截会被墙盖住
     drawMaze();
     drawItems();
     drawDiamonds();
     drawLaserPreview();
     drawTrails(now);
-    tanks.forEach((t) => drawTank(t, now));
+    // 暗黑模式下自己的坦克标签和弹药角标延后到黑幕之后画，避免被视野遮罩涂黑
+    const dark = isDarkMode();
+    tanks.forEach((t) => drawTank(t, now, dark && t.id === myId));
     bullets.forEach(drawBullet);
     drawLasers(now);
-    drawAmmoBadge(); // 画在子弹/激光之上，贴边时也不会被飞过的弹体盖住
+    if (!dark) drawAmmoBadge(); // 画在子弹/激光之上，贴边时也不会被飞过的弹体盖住
     drawExplosions(now);
     drawShieldBreaks(now);
     drawSpawnBlocks(now);
@@ -2602,6 +2707,10 @@
     drawHitSparks(now);
     drawFloatTexts(now);
     drawDarkness(); // 必须最后画：视野之外的墙、坦克、子弹、特效统统一片黑
+    // 黑幕之后补画自己的昵称/血量/弹药，保证这三项操作必需的信息永远不被遮挡。
+    if (dark) drawSelfStatus();
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // 复位，界面类绘制（暂无）保持屏幕坐标
   }
 
   // ---------- 键盘输入 ----------

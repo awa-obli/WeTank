@@ -704,7 +704,7 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 #game-canvas {
   width: 100%; height: auto; display: block;
   background: #1B4B43;
-  border: 4px solid var(--ink); border-radius: 12px;
+  border-radius: 12px;
 }
 /* 开局公告条：进入对局时短暂显示模式与胜负目标，随后自动淡出。
    放画布顶部居中而不是正中，避免遮挡出生动画和中间视野。 */

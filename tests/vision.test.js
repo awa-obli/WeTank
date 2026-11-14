@@ -56,9 +56,9 @@ test('矩形展开成 4 条遮挡线段', () => {
   assert.deepEqual(buildSegments(null), []);
 });
 
-test('默认视野参数：90° / 360px / 60px', () => {
+test('默认视野参数：90° / 320px / 60px', () => {
   close(DEFAULT_FOV, (90 * Math.PI) / 180);
-  assert.equal(DEFAULT_RANGE, 360);
+  assert.equal(DEFAULT_RANGE, 320);
   assert.equal(DEFAULT_NEAR_RADIUS, 60);
 });
 
@@ -147,13 +147,13 @@ test('可见多边形：扇形边界外不会漏出近身圈以外的区域', ()
   };
   const inside = (deg, dist) => pointInPolygon(points, ...at(deg, dist));
 
-  assert.ok(inside(0, 300), '正前方 300px 应可见');
-  assert.ok(inside(28.6, 300), '扇形内 300px 应可见');
+  assert.ok(inside(0, 200), '正前方 200px 应可见');
+  assert.ok(inside(28.6, 200), '扇形内 200px 应可见');
   // 扇形边界（±45°）之外、近身圈（60px）之外：必须不可见。
   // 这里专门覆盖"边界径向跳变"用长斜边近似导致的漏视野问题。
   for (const deg of [46, -46, 60, -60, 90, -90]) {
     assert.ok(!inside(deg, 100), `${deg}° 方向 100px 不应可见`);
-    assert.ok(!inside(deg, 300), `${deg}° 方向 300px 不应可见`);
+    assert.ok(!inside(deg, 200), `${deg}° 方向 200px 不应可见`);
   }
   // 近身圈内不朝向的方向仍然可见
   assert.ok(inside(46, 50), '近身圈内 46° 50px 应可见');

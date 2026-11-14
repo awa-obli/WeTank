@@ -26,7 +26,7 @@
   const FULL_TURN = Math.PI * 2;
   // 默认视野参数，与 client.js 里的 DARK_* 常量保持一致（测试也直接引用这里的默认值）。
   const DEFAULT_FOV = (90 * Math.PI) / 180; // 面朝方向两侧各 45°
-  const DEFAULT_RANGE = 360;                // 扇形最大距离（4.5 格）
+  const DEFAULT_RANGE = 320;                // 扇形最大距离（4 格）
   const DEFAULT_NEAR_RADIUS = 60;           // 近身圈半径（约 0.75 格）
 
   const EPS = 1e-9;
@@ -159,7 +159,7 @@
    *   segments   buildSegments 的结果
    *   x, y       坦克中心
    *   angle      坦克朝向（弧度）
-   *   fov/range/nearRadius  视野参数，默认 90° / 360px / 60px
+   *   fov/range/nearRadius  视野参数，默认 90° / 320px / 60px
    *   coneStep   扇形内采样角步长，默认 1°
    *   outerStep  扇形外近身圆弧采样步长，默认 3°
    * @returns {Array<{x:number,y:number}>} 多边形顶点，可直接 moveTo/lineTo 后 fill
