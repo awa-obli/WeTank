@@ -167,10 +167,14 @@
             <span class="settings-label">游戏模式</span>
             <div id="mode-picker" class="mode-picker" role="group" aria-label="游戏模式"></div>
             <button id="btn-team-mode" class="team-mode-row" type="button" role="checkbox" aria-checked="false" aria-label="团队模式开关" disabled>
-              <span class="team-mode-box" aria-hidden="true"></span>
-              <span class="team-mode-name">团队模式</span>
+              <span class="toggle-box" aria-hidden="true"></span>
+              <span class="toggle-name">团队模式</span>
             </button>
             <button id="btn-shuffle-teams" class="map-option team-shuffle hidden" type="button">重新分队</button>
+            <button id="btn-dark-mode" class="dark-mode-row" type="button" role="checkbox" aria-checked="false" aria-label="暗黑模式开关" disabled>
+              <span class="toggle-box" aria-hidden="true"></span>
+              <span class="toggle-name">暗黑模式</span>
+            </button>
             <p id="mode-desc" class="mode-desc"></p>
           </div>
           <div id="kill-target-group" class="settings-group hidden">
@@ -267,6 +271,7 @@
   </div>
 </section>
 
+<script src="vision.js"></script>
 <script src="client.js"></script>
 </body>
 </html>

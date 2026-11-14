@@ -310,6 +310,9 @@ class Room {
     // 团队对抗开关：对所有模式生效，只在大厅可改。关闭时所有人的 team=null，
     // 开启时由 ensureTeams 自动分成红/蓝两队。
     this.teamMode = false;
+    // 暗黑模式开关：与团队对抗并列的房间级开关，同样只在大厅可改。
+    // 开启后由客户端按"面朝 90° 扇形 + 近身小圈、墙体遮挡"裁掉视野，服务端只负责广播标志。
+    this.darkMode = false;
     // 占点模式当前据点：{ id, x, y, radius, progress, ownerId, ownerTeam, ownerColor, status }。
     // 只有 capture 模式在 startRound 时生成；其他模式保持 null。
     this.point = null;
@@ -353,6 +356,7 @@ class Room {
       mode: this.mode,
       // 团队对抗开关与四类团队统计都下发，客户端按当前模式选用对应的一份。
       teamMode: this.teamMode,
+      darkMode: this.darkMode,
       teamKills: { ...this.teamKills },
       teamCaptures: { ...this.teamCaptures },
       teamDiamonds: { ...this.teamDiamonds },
@@ -464,6 +468,15 @@ class Room {
     }
   }
 
+  // 开关暗黑模式。视野裁剪完全是客户端渲染行为，这里只保存并广播标志；
+  // 与团队对抗、具体游戏模式都互相独立，互不影响。
+  setDarkMode(enabled) {
+    const next = !!enabled;
+    if (this.darkMode === next) return false;
+    this.darkMode = next;
+    return true;
+  }
+
   // 重新分队：洗牌后按红蓝交替分配，人数差最多 1；起始队伍随机，
   // 避免每次洗牌都是红队多一人。
   shuffleTeams() {
@@ -527,7 +540,17 @@ class Room {
   gameStartMessage(extra = {}) {
     return {
       type: 'game_start',
-      maze: { wallsV: this.maze.wallsV, wallsH: this.maze.wallsH, cell: CELL, cols: this.cols, rows: this.rows, wallThick: WALL_THICK },
+      // 墙体数据：wallsV/wallsH 用于绘制，rects 与碰撞/激光用的是同一套矩形，
+      // 客户端暗黑模式直接拿它做视线遮挡，保证"看到的墙"和"挡视线的墙"完全一致。
+      maze: {
+        wallsV: this.maze.wallsV,
+        wallsH: this.maze.wallsH,
+        rects: this.maze.rects,
+        cell: CELL,
+        cols: this.cols,
+        rows: this.rows,
+        wallThick: WALL_THICK,
+      },
       players: this.playerList(),
       spectators: this.spectatorList(),
       worldW: this.worldW,
@@ -539,6 +562,7 @@ class Room {
       maxHp: this.maxHp,
       mode: this.mode,
       teamMode: this.teamMode,
+      darkMode: this.darkMode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
       collectTarget: this.collectTarget,
@@ -602,6 +626,7 @@ class Room {
       point: this.pointMessage(),
       // 团队统计：和每帧 state 一起下发，客户端 HUD 只在对应值变化时重建。
       teamMode: this.teamMode,
+      darkMode: this.darkMode,
       teamKills: { ...this.teamKills },
       teamCaptures: { ...this.teamCaptures },
       teamDiamonds: { ...this.teamDiamonds },
@@ -1587,6 +1612,7 @@ class Room {
       final: Boolean(champion) || this.players.size < 2,
       mode: this.mode,
       teamMode: this.teamMode,
+      darkMode: this.darkMode,
       teamWins: { ...this.teamWins },
       winScore: this.winScore,
     });
@@ -1623,6 +1649,7 @@ class Room {
       final: champion || this.players.size < 2,
       mode: this.mode,
       teamMode: true,
+      darkMode: this.darkMode,
       teamWins: { ...this.teamWins },
       winScore: this.winScore,
     });
@@ -1672,6 +1699,7 @@ class Room {
       reason,
       mode: this.mode,
       teamMode: this.teamMode,
+      darkMode: this.darkMode,
       killTarget: this.killTarget,
       captureTarget: this.captureTarget,
       collectTarget: this.collectTarget,
@@ -1768,9 +1796,10 @@ function roomSummary(room) {
     maxPlayers: MAX_PLAYERS,
     state: room.state,
     hostName: host ? host.name : '',
-    // 模式是选房时会关心的公开信息（列表卡片上显示徽章），团队对抗开关同理。
+    // 模式是选房时会关心的公开信息（列表卡片上显示徽章），团队对抗/暗黑模式开关同理。
     mode: room.mode,
     teamMode: room.teamMode,
+    darkMode: room.darkMode,
   };
 }
 
@@ -1839,7 +1868,7 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: [],
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-        mode: room.mode, teamMode: room.teamMode,
+        mode: room.mode, teamMode: room.teamMode, darkMode: room.darkMode,
         killTarget: room.killTarget, captureTarget: room.captureTarget,
         collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
@@ -1877,7 +1906,7 @@ wss.on('connection', (ws) => {
           type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
           spectating: true, players: room.playerList(), spectators: room.spectatorList(),
           mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-          mode: room.mode, teamMode: room.teamMode,
+          mode: room.mode, teamMode: room.teamMode, darkMode: room.darkMode,
           killTarget: room.killTarget, captureTarget: room.captureTarget,
           collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
           respawnDelay: BRAWL_RESPAWN_DELAY,
@@ -1901,7 +1930,7 @@ wss.on('connection', (ws) => {
         type: 'joined', code, roomName: room.name, playerId, hostId: room.hostId,
         spectating: false, players: room.playerList(), spectators: room.spectatorList(),
         mapType: room.mapType, mapSize: room.mapSize, maxHp: room.maxHp,
-        mode: room.mode, teamMode: room.teamMode,
+        mode: room.mode, teamMode: room.teamMode, darkMode: room.darkMode,
         killTarget: room.killTarget, captureTarget: room.captureTarget,
         collectTarget: room.collectTarget, winScore: room.winScore, captureTime: CAPTURE_TIME,
         respawnDelay: BRAWL_RESPAWN_DELAY,
@@ -2021,6 +2050,20 @@ wss.on('connection', (ws) => {
         return;
       }
       if (currentRoom.setTeamMode(msg.enabled === true)) currentRoom.broadcastRoom();
+      return;
+    }
+
+    if (msg.type === 'set_dark_mode') {
+      // 暗黑模式和团队对抗一样是房主专属、只在大厅可改；两者互不影响。
+      if (currentRoom.hostId !== playerId) {
+        ws.send(JSON.stringify({ type: 'error', message: '只有房主可以修改暗黑模式' }));
+        return;
+      }
+      if (currentRoom.state !== 'lobby') {
+        ws.send(JSON.stringify({ type: 'error', message: '游戏进行中不能修改暗黑模式' }));
+        return;
+      }
+      if (currentRoom.setDarkMode(msg.enabled === true)) currentRoom.broadcastRoom();
       return;
     }
 

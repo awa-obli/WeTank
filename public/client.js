@@ -52,6 +52,7 @@
   const modePickerEl = document.getElementById('mode-picker');
   const modeDescEl = document.getElementById('mode-desc');
   const btnTeamMode = document.getElementById('btn-team-mode');
+  const btnDarkMode = document.getElementById('btn-dark-mode');
   const btnShuffleTeams = document.getElementById('btn-shuffle-teams');
   const killTargetGroup = document.getElementById('kill-target-group');
   const killTargetLabelEl = document.getElementById('kill-target-label');
@@ -124,6 +125,7 @@
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
   let mode = 'brawl'; // 房间级设置：brawl=大乱斗 / collect=收集 / capture=占点 / classic=经典
   let teamMode = false; // 房间级开关：对所有模式生效，开启后红蓝分队、胜负按队伍统计
+  let darkMode = false; // 房间级开关：开启后客户端只渲染面朝 90° 扇形 + 近身小圈，墙体遮挡，其余全黑
   let killTarget = 10; // 大乱斗胜利所需击杀数（团队对抗下为队伍总击杀），以服务端广播为准
   let captureTarget = 3; // 占点模式胜利所需占领次数（团队对抗下为队伍占领数），以服务端广播为准
   let collectTarget = 10; // 收集模式胜利所需钻石数（团队对抗下为队伍总钻石），以服务端广播为准
@@ -146,6 +148,9 @@
   const MIN_WIN_SCORE = 1;
   const MAX_WIN_SCORE = 10;
   let maze = null;
+  // 暗黑模式："填黑 → 挖洞"用的离屏遮罩；墙体阴影每帧由 maze.rects 现算。
+  let darkMaskCanvas = null;
+  let darkMaskCtx = null;
   let worldW = 960, worldH = 640;
   let tanks = [];
   let bullets = [];
@@ -213,6 +218,9 @@
   }
   function isTeamMode() {
     return teamMode;
+  }
+  function isDarkMode() {
+    return darkMode;
   }
   function isCaptureMode() {
     return mode === 'capture';
@@ -458,6 +466,10 @@
     if (myId !== hostId) return;
     send({ type: 'set_team_mode', enabled: !isTeamMode() });
   });
+  btnDarkMode.addEventListener('click', () => {
+    if (myId !== hostId) return;
+    send({ type: 'set_dark_mode', enabled: !isDarkMode() });
+  });
   btnShuffleTeams.addEventListener('click', () => {
     if (myId !== hostId) return;
     send({ type: 'shuffle_teams' });
@@ -631,6 +643,7 @@
         const prevSpecIds = spectators.map((s) => s.id).join('|');
         spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
         if (typeof msg.teamMode === 'boolean') teamMode = msg.teamMode;
+        if (typeof msg.darkMode === 'boolean') darkMode = msg.darkMode;
         const activeChanged = syncPlayersFromTanks(msg.tanks);
         const scoreChanged = syncScoresFromTanks(msg.tanks);
         const teamChanged = syncTeamStats(msg);
@@ -841,6 +854,7 @@
       mode = 'brawl';
     }
     if (typeof msg.teamMode === 'boolean') teamMode = msg.teamMode;
+    if (typeof msg.darkMode === 'boolean') darkMode = msg.darkMode;
     if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
     if (Number.isInteger(msg.captureTarget)) captureTarget = msg.captureTarget;
     if (Number.isInteger(msg.collectTarget)) collectTarget = msg.collectTarget;
@@ -1001,7 +1015,7 @@
       if (room.state !== 'lobby') {
         const roomMode = document.createElement('span');
         roomMode.className = 'room-mode';
-        roomMode.textContent = `${modeName(room.mode)}${room.teamMode ? ' · 团队' : ''}`;
+        roomMode.textContent = `${modeName(room.mode)}${room.teamMode ? ' · 团队' : ''}${room.darkMode ? ' · 暗黑' : ''}`;
         meta.appendChild(roomMode);
       }
 
@@ -1030,6 +1044,7 @@
     spectators = [];
     spectating = false;
     teamMode = false;
+    darkMode = false;
     resetTeamStats();
     myTeam = null;
     roomList = [];
@@ -1174,6 +1189,7 @@
 
     renderModePicker();
     renderTeamModeSetting();
+    renderDarkModeSetting();
     renderMapTypePicker();
     renderMapPicker();
     renderHpSetting();
@@ -1191,6 +1207,13 @@
     btnTeamMode.setAttribute('aria-checked', on ? 'true' : 'false');
     btnShuffleTeams.classList.toggle('hidden', !on);
     btnShuffleTeams.disabled = !amHost;
+  }
+
+  // 暗黑模式勾选框：与团队模式一样只做只读渲染，点击后等服务端 room_update 回来再更新。
+  function renderDarkModeSetting() {
+    const amHost = myId === hostId;
+    btnDarkMode.disabled = !amHost;
+    btnDarkMode.setAttribute('aria-checked', isDarkMode() ? 'true' : 'false');
   }
 
   // 大厅右侧的地图类型选择：房主可点，其他玩家只能看到当前类型（按钮禁用，保持只读）。
@@ -2466,6 +2489,97 @@
     ctx.restore();
   }
 
+  // ---------- 暗黑模式：视野遮罩 ----------
+  // 视野形状 = 面朝 90° 扇形（最远 360px）+ 近身 60px 小圈，先把理想形状的每条边缘
+  // 向外羽化（边界外 12px 内渐入），再用每堵墙的阴影多边形把墙后硬切成全黑。
+  // 这样扇形/近身圈在撞到墙之前一直保持羽化，墙后是硬边；墙体自身不会被羽化。
+  // 观战者不受影响（看全图），自己阵亡时画面全黑、复活后恢复。
+  const DARK_FOV = (90 * Math.PI) / 180;
+  const DARK_RANGE = 360;
+  const DARK_NEAR_RADIUS = 60;
+  const DARK_FEATHER = 12;       // 向外羽化的距离（px）
+  const DARK_FEATHER_STEPS = 20; // 羽化分层数：每层一次多边形填充，越多越平滑
+
+  // 离屏遮罩与主画布等大：先填满纯黑，再用 destination-out 挖出可见区域。
+  function ensureDarkMask() {
+    if (!darkMaskCanvas) {
+      darkMaskCanvas = document.createElement('canvas');
+      darkMaskCtx = darkMaskCanvas.getContext('2d');
+    }
+    if (darkMaskCanvas.width !== canvas.width || darkMaskCanvas.height !== canvas.height) {
+      darkMaskCanvas.width = canvas.width;
+      darkMaskCanvas.height = canvas.height;
+    }
+    return darkMaskCtx;
+  }
+
+  function tracePolygon(c, points) {
+    c.beginPath();
+    c.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) c.lineTo(points[i].x, points[i].y);
+    c.closePath();
+  }
+
+  function drawDarkness() {
+    if (!isDarkMode() || spectating) return;
+    const self = tanks.find((t) => t.id === myId);
+    const mask = ensureDarkMask();
+    const width = darkMaskCanvas.width;
+    const height = darkMaskCanvas.height;
+
+    // 每次重画前把离屏遮罩的绘制状态复位，避免上一帧的合成模式 / alpha 残留。
+    mask.setTransform(1, 0, 0, 1, 0, 0);
+    mask.globalCompositeOperation = 'source-over';
+    mask.globalAlpha = 1;
+    mask.clearRect(0, 0, width, height);
+    mask.fillStyle = '#000';
+    mask.fillRect(0, 0, width, height);
+
+    // 阵亡时没有坦克（state 里 alive=false 或本帧还没出现），不挖洞 → 全黑。
+    if (self && self.alive) {
+      // 1) 理想视野形状（扇形 + 近身圈，不含墙体遮挡），整圈向外羽化。
+      const points = TankVision.visibilityPolygon({
+        segments: [],
+        x: self.x,
+        y: self.y,
+        angle: self.angle,
+        fov: DARK_FOV,
+        range: DARK_RANGE,
+        nearRadius: DARK_NEAR_RADIUS,
+      });
+      if (points.length >= 3) {
+        mask.globalCompositeOperation = 'destination-out';
+        const rings = TankVision.featherRings(
+          points,
+          self.x,
+          self.y,
+          DARK_FEATHER,
+          DARK_FEATHER_STEPS
+        );
+        for (const ring of rings) {
+          mask.globalAlpha = ring.alpha;
+          tracePolygon(mask, ring.points);
+          mask.fill();
+        }
+        mask.globalAlpha = 1;
+      }
+
+      // 2) 墙后阴影整块涂黑：硬边切断羽化，墙前（包括撞墙前的扇形边界）保持羽化。
+      const shadowLength = DARK_RANGE + DARK_FEATHER + 8;
+      const rects = (maze && Array.isArray(maze.rects)) ? maze.rects : [];
+      const shadows = TankVision.wallShadowPolygons(rects, self.x, self.y, shadowLength);
+      mask.globalCompositeOperation = 'source-over';
+      mask.fillStyle = '#000';
+      for (const shadow of shadows) {
+        if (shadow.length < 3) continue;
+        tracePolygon(mask, shadow);
+        mask.fill();
+      }
+    }
+
+    ctx.drawImage(darkMaskCanvas, 0, 0);
+  }
+
   function draw() {
     const now = performance.now();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2487,6 +2601,7 @@
     drawPointCaptureFx(now);
     drawHitSparks(now);
     drawFloatTexts(now);
+    drawDarkness(); // 必须最后画：视野之外的墙、坦克、子弹、特效统统一片黑
   }
 
   // ---------- 键盘输入 ----------

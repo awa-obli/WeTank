@@ -542,8 +542,10 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   font-size: 11px; font-weight: 600; line-height: 1.5;
 }
 
-/* 团队模式勾选框：紧跟在模式选项下方，右侧文字；开启时方块填充黄色并出现勾 */
-.team-mode-row {
+/* 独立开关（团队模式 / 暗黑模式）：紧跟在模式选项下方，左侧勾选框 + 右侧文字；
+   开启时方块填充黄色并出现勾。两者样式完全一致，只是语义不同。 */
+.team-mode-row,
+.dark-mode-row {
   display: flex; align-items: center; gap: 9px;
   margin-top: 12px; padding: 6px 2px;
   background: none; border: none; color: var(--text);
@@ -551,7 +553,7 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   font: inherit; text-align: left;
   cursor: pointer;
 }
-.team-mode-box {
+.toggle-box {
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: center;
   width: 20px; height: 20px;
@@ -562,12 +564,17 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   font: 800 14px/1 'Space Grotesk', sans-serif;
   transition: background .12s ease;
 }
-.team-mode-row[aria-checked="true"] .team-mode-box { background: var(--yellow); }
-.team-mode-row[aria-checked="true"] .team-mode-box::after { content: '✓'; }
-.team-mode-name { font-size: 14px; font-weight: 700; }
-.team-mode-row:not(:disabled):hover .team-mode-box { border-color: var(--green); }
-.team-mode-row:disabled { cursor: not-allowed; opacity: .55; }
-.team-mode-row:disabled[aria-checked="true"] { opacity: .85; }
+.team-mode-row[aria-checked="true"] .toggle-box,
+.dark-mode-row[aria-checked="true"] .toggle-box { background: var(--yellow); }
+.team-mode-row[aria-checked="true"] .toggle-box::after,
+.dark-mode-row[aria-checked="true"] .toggle-box::after { content: '✓'; }
+.toggle-name { font-size: 14px; font-weight: 700; }
+.team-mode-row:not(:disabled):hover .toggle-box,
+.dark-mode-row:not(:disabled):hover .toggle-box { border-color: var(--green); }
+.team-mode-row:disabled,
+.dark-mode-row:disabled { cursor: not-allowed; opacity: .55; }
+.team-mode-row:disabled[aria-checked="true"],
+.dark-mode-row:disabled[aria-checked="true"] { opacity: .85; }
 .team-shuffle { margin-top: 10px; }
 
 /* 初始血量：数字输入 + 两侧 −/+ 微调；非房主整组禁用，只读显示当前值 */
