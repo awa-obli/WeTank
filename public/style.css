@@ -706,6 +706,31 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   background: #1B4B43;
   border-radius: 12px;
 }
+/* 小地图：画布右上角的覆盖层。内部固定 480×320（地图恒为 3:2），
+   CSS 缩放到 150×100，高分屏也不会糊；不接收指针事件，不会挡住操作。
+   半透明（opacity）让下面的游戏画面透出来一点，减少对视野的遮挡；
+   不设 z-index：按 DOM 顺序排在主画布之后、开局公告/观战横幅/复活条/结算遮罩之前，
+   所以这些覆盖层天然压在小地图上面，回合结束时小地图会被遮罩一起盖住。 */
+.minimap {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  box-sizing: content-box; /* 边框不占画布内容区，保证 480×320 正好显示成 3:2 */
+  width: 150px;
+  height: 100px;
+  background: #06110F;
+  border: 2px solid rgba(242, 251, 249, 0.36);
+  border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.45);
+  pointer-events: none;
+  opacity: 0.8;
+}
+@media (max-width: 720px) {
+  .minimap { top: 8px; right: 8px; width: 108px; height: 72px; border-width: 1.5px; }
+}
+@media (max-width: 480px) {
+  .minimap { width: 90px; height: 60px; }
+}
 /* 开局公告条：进入对局时短暂显示模式与胜负目标，随后自动淡出。
    放画布顶部居中而不是正中，避免遮挡出生动画和中间视野。 */
 .match-intro {
@@ -810,6 +835,7 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   --control-bottom: max(46px, env(safe-area-inset-bottom));
   --fire-size: 84px;
   --fire-gap: 14px;
+  --move-size: 64px;
 }
 body.is-touch .touch-controls { display: block; }
 
@@ -956,8 +982,8 @@ body.is-touch.control-dpad .btn-move-toggle { display: none; }
   right: var(--control-edge);
   /* 叠在开火按钮正上方：开火按钮底部基准 + 开火按钮高度 + 间距 */
   bottom: calc(var(--control-bottom) + var(--fire-size) + var(--fire-gap));
-  width: 64px;
-  height: 64px;
+  width: var(--move-size);
+  height: var(--move-size);
   border-radius: 50%;
   background: rgba(18, 56, 50, 0.55); /* 半透明，静止态用 panel 色系，避免遮挡地图 */
   color: var(--muted);
@@ -979,16 +1005,46 @@ body.is-touch.control-dpad .btn-move-toggle { display: none; }
   transform: translate(3px, 3px);
 }
 
+/* 视野切换：全图 / 跟随，放在右侧控件最上方（移动切换之上）。
+   跟随态用和移动切换一致的半透明深色，全图态高亮成黄色，和移动态的绿色区分。 */
+.btn-view-toggle {
+  position: absolute;
+  right: var(--control-edge);
+  bottom: calc(var(--control-bottom) + var(--fire-size) + var(--fire-gap) + var(--move-size) + 10px);
+  width: var(--move-size);
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(18, 56, 50, 0.55);
+  color: var(--muted);
+  border: 3px solid var(--ink);
+  box-shadow: 3px 3px 0 rgba(6, 17, 15, 0.4);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  transition: transform .08s ease, background-color .12s ease, color .12s ease;
+}
+.btn-view-toggle.active {
+  background: rgba(255, 214, 10, 0.62);
+  color: var(--ink);
+  box-shadow: 1px 1px 0 rgba(6, 17, 15, 0.4);
+  transform: translate(3px, 3px);
+}
+/* 十字键模式没有「移动/静止」按钮，视野切换直接压到开火按钮上方 */
+body.is-touch.control-dpad .btn-view-toggle {
+  bottom: calc(var(--control-bottom) + var(--fire-size) + var(--fire-gap));
+}
+
 /* 竖屏时画布变矮，把控件往下压一点避免贴得太近 */
 @media (max-width: 560px) and (orientation: portrait) {
-  .touch-controls { --fire-size: 72px; --fire-gap: 12px; }
+  .touch-controls { --fire-size: 72px; --fire-gap: 12px; --move-size: 56px; }
   .joystick-zone { width: 108px; height: 108px; }
   .joystick-stick { width: 46px; height: 46px; margin: -23px 0 0 -23px; }
   .dpad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
   .btn-fire { font-size: 12px; }
-  .btn-move-toggle {
-    width: 56px;
-    height: 56px;
-    font-size: 11px;
-  }
+  .btn-move-toggle { font-size: 11px; }
+  .btn-view-toggle { height: 30px; font-size: 11px; }
 }

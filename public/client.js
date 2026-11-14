@@ -80,6 +80,9 @@
   const matchIntroGoalEl = document.getElementById('match-intro-goal');
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
+  // 小地图是独立覆盖层，内部 480×320 固定尺寸，CSS 负责显示大小（见 style.css）
+  const minimapCanvas = document.getElementById('minimap');
+  const minimapCtx = minimapCanvas.getContext('2d');
   const spectatorBanner = document.getElementById('spectator-banner');
   const respawnBanner = document.getElementById('respawn-banner');
   const overlayRound = document.getElementById('overlay-round');
@@ -88,6 +91,7 @@
 
   const joystickZone = document.getElementById('joystick-zone');
   const joystickStick = document.getElementById('joystick-stick');
+  const btnViewToggle = document.getElementById('btn-view-toggle');
   const btnMoveToggle = document.getElementById('btn-move-toggle');
   const btnFire = document.getElementById('btn-fire');
   const touchControls = document.getElementById('touch-controls');
@@ -2521,9 +2525,9 @@
   // 这样扇形/近身圈在撞到墙之前一直保持羽化，墙后是硬边；墙体自身不会被羽化。
   // 观战者不受影响（看全图），自己阵亡时画面全黑、复活后恢复。
   const DARK_FOV = (90 * Math.PI) / 180;
-  const DARK_RANGE = 320;
+  const DARK_RANGE = 250;
   const DARK_NEAR_RADIUS = 60;
-  const DARK_FEATHER = 12;       // 向外羽化的距离（px）
+  const DARK_FEATHER = 16;       // 向外羽化的距离（px）
   const DARK_FEATHER_STEPS = 20; // 羽化分层数：每层一次多边形填充，越多越平滑
 
   // 离屏遮罩与主画布等大：先填满纯黑，再用 destination-out 挖出可见区域。
@@ -2546,6 +2550,27 @@
     c.closePath();
   }
 
+  // 暗黑视野的两块几何（都是世界坐标，主画面和小地图共用，保证两者看到的范围一致）：
+  //   ideal    理想视野形状（扇形 + 近身圈，不含墙体遮挡），用于挖洞；
+  //   shadows  每堵墙后面的阴影多边形，用于把墙后硬切成全黑。
+  function buildVisionGeometry(self) {
+    const ideal = TankVision.visibilityPolygon({
+      segments: [],
+      x: self.x,
+      y: self.y,
+      angle: self.angle,
+      fov: DARK_FOV,
+      range: DARK_RANGE,
+      nearRadius: DARK_NEAR_RADIUS,
+    });
+    const shadowLength = DARK_RANGE + DARK_FEATHER + 8;
+    const rects = (maze && Array.isArray(maze.rects)) ? maze.rects : [];
+    return {
+      ideal,
+      shadows: TankVision.wallShadowPolygons(rects, self.x, self.y, shadowLength),
+    };
+  }
+
   function drawDarkness() {
     if (!isDarkMode() || spectating) return;
     const self = tanks.find((t) => t.id === myId);
@@ -2563,20 +2588,13 @@
 
     // 阵亡时没有坦克（state 里 alive=false 或本帧还没出现），不挖洞 → 全黑。
     if (self && self.alive) {
+      const { ideal, shadows } = buildVisionGeometry(self);
+
       // 1) 理想视野形状（扇形 + 近身圈，不含墙体遮挡），整圈向外羽化。
-      const points = TankVision.visibilityPolygon({
-        segments: [],
-        x: self.x,
-        y: self.y,
-        angle: self.angle,
-        fov: DARK_FOV,
-        range: DARK_RANGE,
-        nearRadius: DARK_NEAR_RADIUS,
-      });
-      if (points.length >= 3) {
+      if (ideal.length >= 3) {
         mask.globalCompositeOperation = 'destination-out';
         const rings = TankVision.featherRings(
-          points,
+          ideal,
           self.x,
           self.y,
           DARK_FEATHER,
@@ -2591,9 +2609,6 @@
       }
 
       // 2) 墙后阴影整块涂黑：硬边切断羽化，墙前（包括撞墙前的扇形边界）保持羽化。
-      const shadowLength = DARK_RANGE + DARK_FEATHER + 8;
-      const rects = (maze && Array.isArray(maze.rects)) ? maze.rects : [];
-      const shadows = TankVision.wallShadowPolygons(rects, self.x, self.y, shadowLength);
       mask.globalCompositeOperation = 'source-over';
       mask.fillStyle = '#000';
       for (const shadow of shadows) {
@@ -2606,21 +2621,206 @@
     ctx.drawImage(darkMaskCanvas, 0, 0);
   }
 
+  // ---------- 小地图 ----------
+  // 独立覆盖层 canvas：不参与主画布的相机变换，也不会被主画面的暗黑遮罩涂黑，
+  // 所以两种模式的显示规则都在这里实现：
+  //   - 非暗黑 / 观战：整张地图结构 + 所有存活玩家 + 模式目标；
+  //   - 暗黑模式：先画同一份场景，再把主画面同款的视野遮罩缩小盖上去。
+  //     不额外做"谁可见"的判断——墙、玩家、目标被同一块黑幕裁掉，
+  //     视野边界、墙角遮挡和主画面完全一致；自己最后画在黑幕之上，永不被遮。
+  // 观战者没有自己的坦克，按"看全图"处理（主画面本来就不套黑幕）。
+  const MINIMAP_PAD = 6;             // 地图四周留白（小地图像素）
+  const MINIMAP_FLOOR = '#1B4B43';   // 与主画面地板同色
+  const MINIMAP_WALL = '#06110F';    // 与主画面墙体同色
+  const MINIMAP_BG = '#06110F';      // 地图外与暗黑遮罩同色：暗黑模式下图外和黑幕无缝衔接
+  const MINIMAP_DOT_MIN = 6;         // 玩家圆点最小半径，小地图缩小时也不会踩不到
+  const MINIMAP_DOT_SCALE = 1.25;    // 圆点相对坦克实际半径的放大倍数：小地图上比车身略大更好认
+  let minimapMaskCanvas = null;      // 小地图的暗黑遮罩离屏画布（与小地图等大）
+  let minimapMaskCtx = null;
+
+  function ensureMinimapMask() {
+    if (!minimapMaskCanvas) {
+      minimapMaskCanvas = document.createElement('canvas');
+      minimapMaskCtx = minimapMaskCanvas.getContext('2d');
+    }
+    if (minimapMaskCanvas.width !== minimapCanvas.width) {
+      minimapMaskCanvas.width = minimapCanvas.width;
+    }
+    if (minimapMaskCanvas.height !== minimapCanvas.height) {
+      minimapMaskCanvas.height = minimapCanvas.height;
+    }
+    return minimapMaskCtx;
+  }
+
+  // 地图底与墙体：服务端下发的 rects 和碰撞、视野射线用的是同一套矩形；
+  // 外围边框矩形的中心在世界边界上、半宽超出地图，所以先裁到地图矩形再画。
+  function drawMinimapWalls(c, layout) {
+    if (!maze || !Array.isArray(maze.rects)) return;
+    c.fillStyle = MINIMAP_WALL;
+    for (const rect of maze.rects) {
+      const box = TankMinimap.rectToMini(layout, rect);
+      if (!box || !(box.w > 0) || !(box.h > 0)) continue;
+      c.fillRect(box.x, box.y, box.w, box.h);
+    }
+  }
+
+  // 模式目标：占点圈画成与实际半径等比的细环（带进度），钻石画成小圆点。
+  // 这些标记在主画面里也属于"场景"，暗黑模式下会被随后的小地图遮罩一起裁掉。
+  function drawMinimapObjectives(c, layout) {
+    if (isCaptureMode() && capturePoint) {
+      const p = TankMinimap.worldToMini(layout, capturePoint.x, capturePoint.y);
+      const r = Math.max(3, capturePoint.radius * layout.scale);
+      c.beginPath();
+      c.arc(p.x, p.y, r, 0, Math.PI * 2);
+      c.strokeStyle = POINT_SLOT_COLOR;
+      c.lineWidth = 2;
+      c.stroke();
+      if (capturePoint.progress > 0) {
+        c.beginPath();
+        c.arc(p.x, p.y, r, -Math.PI / 2, -Math.PI / 2 + capturePoint.progress * Math.PI * 2);
+        c.strokeStyle = capturePoint.ownerColor || POINT_COLOR;
+        c.lineWidth = 2.5;
+        c.lineCap = 'round';
+        c.stroke();
+      }
+    }
+    if (isCollectMode()) {
+      for (const d of diamonds) {
+        const p = TankMinimap.worldToMini(layout, d.x, d.y);
+        const r = Math.max(3, DIAMOND_ICON_RADIUS * layout.scale);
+        c.beginPath();
+        c.arc(p.x, p.y, r, 0, Math.PI * 2);
+        c.fillStyle = DIAMOND_COLOR;
+        c.fill();
+        c.strokeStyle = '#06110F';
+        c.lineWidth = 1;
+        c.stroke();
+      }
+    }
+  }
+
+  // 玩家圆点：颜色沿用主画面的 displayColor（团队模式自动变成队伍色）。
+  // 自己的点带白色描边 + 朝向短线，团队模式下和同色队友也能一眼分开。
+  function drawMinimapPlayerDot(c, layout, t, isSelf) {
+    const p = TankMinimap.worldToMini(layout, t.x, t.y);
+    const r = Math.max(MINIMAP_DOT_MIN, TANK_RADIUS * layout.scale * MINIMAP_DOT_SCALE);
+    c.beginPath();
+    c.arc(p.x, p.y, r, 0, Math.PI * 2);
+    c.fillStyle = displayColor(t);
+    c.fill();
+    c.strokeStyle = isSelf ? '#F2FBF9' : '#06110F';
+    c.lineWidth = isSelf ? 2 : 1.5;
+    c.stroke();
+    if (!isSelf) return;
+    const ax = Math.cos(t.angle);
+    const ay = Math.sin(t.angle);
+    c.beginPath();
+    c.moveTo(p.x + ax * r, p.y + ay * r);
+    c.lineTo(p.x + ax * r * 2.1, p.y + ay * r * 2.1);
+    c.strokeStyle = '#F2FBF9';
+    c.lineWidth = 2;
+    c.lineCap = 'round';
+    c.stroke();
+  }
+
+  // 把主画面同款视野遮罩缩到小地图上：同样先整块填黑、用理想视野挖洞，
+  // 再把墙后阴影涂黑。不放羽化（小地图尺寸小，硬边更清晰）。
+  function drawMinimapDarkness(c, layout, self) {
+    const width = minimapCanvas.width;
+    const height = minimapCanvas.height;
+    const { ideal, shadows } = buildVisionGeometry(self);
+    const idealMini = TankMinimap.toMiniPolygon(layout, ideal);
+    if (idealMini.length < 3) {
+      // 理论上不会发生（暗黑模式下自己一定活着且视野参数合法）；
+      // 万一几何退化，直接整块涂黑，绝不能把全图露出来。
+      c.fillStyle = MINIMAP_BG;
+      c.fillRect(0, 0, width, height);
+      return;
+    }
+
+    const mask = ensureMinimapMask();
+    mask.setTransform(1, 0, 0, 1, 0, 0);
+    mask.globalCompositeOperation = 'source-over';
+    mask.globalAlpha = 1;
+    mask.clearRect(0, 0, width, height);
+    mask.fillStyle = MINIMAP_BG;
+    mask.fillRect(0, 0, width, height);
+
+    mask.globalCompositeOperation = 'destination-out';
+    tracePolygon(mask, idealMini);
+    mask.fill();
+
+    mask.globalCompositeOperation = 'source-over';
+    for (const shadow of shadows) {
+      const mini = TankMinimap.toMiniPolygon(layout, shadow);
+      if (mini.length < 3) continue;
+      tracePolygon(mask, mini);
+      mask.fill();
+    }
+    c.drawImage(minimapMaskCanvas, 0, 0);
+  }
+
+  function drawMinimap() {
+    if (!maze) return;
+    const c = minimapCtx;
+    const width = minimapCanvas.width;
+    const height = minimapCanvas.height;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, width, height);
+
+    const self = tanks.find((t) => t.id === myId);
+    const dark = isDarkMode() && !spectating;
+    // 暗黑模式下自己阵亡 = 没有视野：主画面是全黑，小地图同样保持空白（CSS 底色）。
+    if (dark && (!self || !self.alive)) return;
+    const layout = TankMinimap.computeLayout(worldW, worldH, width, height, MINIMAP_PAD);
+
+    // 整块画布先铺地图外的深色（也和暗黑遮罩同色），再铺地图地板；
+    // 这样暗黑模式下图外留白和大片黑幕看起来是连成一片的。
+    c.fillStyle = MINIMAP_BG;
+    c.fillRect(0, 0, width, height);
+    c.fillStyle = MINIMAP_FLOOR;
+    c.fillRect(layout.x, layout.y, layout.w, layout.h);
+
+    // 墙体与目标压在地图矩形内（外围边框矩形会超出世界，必须裁掉）。
+    c.save();
+    c.beginPath();
+    c.rect(layout.x, layout.y, layout.w, layout.h);
+    c.clip();
+    drawMinimapWalls(c, layout);
+    drawMinimapObjectives(c, layout);
+    c.restore();
+
+    // 所有存活且未隐身的玩家；隐身的敌人和主画面一样完全不显示。
+    for (const t of tanks) {
+      if (t.id === myId || !t.alive || t.invisible) continue;
+      drawMinimapPlayerDot(c, layout, t, false);
+    }
+
+    if (dark) drawMinimapDarkness(c, layout, self);
+
+    // 自己最后画：暗黑模式下永远压在黑幕之上（和主画面单独补画自己的状态一致）。
+    if (self && self.alive) drawMinimapPlayerDot(c, layout, self, true);
+  }
+
+
   // ---------- 视野跟随 ----------
   // 视口固定 720×480 世界像素（9×6 格，正好等于最小档地图，见 camera.js）：
   // 不管屏幕/地图多大，所有玩家看到的世界范围一致；画面中心始终跟着自己的坦克走，
   // 贴到地图边缘时视口夹紧、坦克会离开画面中心。
   // 阵亡后先保持跟随视角 2 秒（镜头停在阵亡位置），再用过渡动画拉远到整张地图；
   // 复活时再用过渡动画推回坦克。观战者没有坦克，始终看全图。
-  // 这个机制没有开关：所有对局固定使用跟随视野。
+  // 活着时还可以手动在全图 / 跟随之间切换（桌面 V 键、移动端右侧的视野按钮），
+  // 切换同样走这里的过渡动画；手动全图打开后会一直保持（阵亡后也不拉回），
+  // 每回合开局复位成默认的跟随视角。
   const DEATH_FULL_VIEW_DELAY = 2000; // 阵亡后保持跟随视角的时长（ms）
-  const DEATH_ZOOM_OUT_MS = 600;      // 阵亡 → 全图的过渡时长
-  const RESPAWN_ZOOM_IN_MS = 500;     // 复活 → 跟随的过渡时长
+  const VIEW_ZOOM_OUT_MS = 600;       // 切到全图的过渡时长（阵亡拉远 / 手动切换）
+  const VIEW_ZOOM_IN_MS = 500;        // 切回跟随的过渡时长（复活推近 / 手动切换）
   let selfDeadSince = null;   // 自己阵亡的时刻（performance.now()），活着时为 null
   let selfAlivePrev = null;   // 上一帧自己是否存活，用来检测"刚阵亡 / 刚复活"
   let cameraMode = null;      // 'follow' | 'full'：模式变化时启动过渡动画
   let cameraTransition = null; // { from, start, duration }：视口矩形插值过渡
   let lastCameraView = null;   // 上一帧实际使用的视口，作为下一次过渡的起点
+  let fullViewManual = false;  // 玩家手动切到全图视野（活着时才能切换；阵亡后保持，新回合复位）
 
   // 自己存活状态变化：刚阵亡记下时刻（2 秒后才拉远到全图），刚复活清掉。
   // 状态消息 30Hz 推送，所以这里的"阵亡时刻"最多晚 33ms，可以忽略。
@@ -2633,23 +2833,47 @@
   }
 
   // 新回合 / 重连时清空相机状态，让第一帧直接贴到坦克上（不做过渡）。
+  // 手动全图也一起复位：每回合默认从跟随视角开始。
   function resetFollowCamera() {
     selfDeadSince = null;
     selfAlivePrev = null;
     cameraMode = null;
     cameraTransition = null;
     lastCameraView = null;
+    fullViewManual = false;
+    updateViewToggleUi();
+  }
+
+  // 视野按钮显示当前实际生效的视角（跟随 / 全图），全图态高亮。
+  // 镜头模式只在 draw() 里变化，所以这里由 draw() 在切模式时调用。
+  function updateViewToggleUi() {
+    const full = cameraMode === 'full';
+    btnViewToggle.textContent = full ? '全图' : '跟随';
+    btnViewToggle.classList.toggle('active', full);
+    btnViewToggle.setAttribute('aria-pressed', full ? 'true' : 'false');
   }
 
   // 本帧应该用哪种视角。view 是视口矩形：跟随 = 720×480，全图 = 整个世界。
-  // 阵亡后坦克仍然留在 tanks 里（alive=false），所以前 2 秒镜头停在阵亡位置。
+  // 手动全图优先，并且阵亡后继续保持（否则会先被拉近到尸体再拉远，镜头来回抖一下）；
+  // 没有手动全图时：活着跟随；阵亡后前 2 秒停在阵亡位置，之后自动拉远到全图。
   function desiredCamera(now) {
     const self = tanks.find((t) => t.id === myId);
     if (spectating || !self) return { mode: 'full', view: TankCamera.fullView(worldW, worldH) };
+    if (fullViewManual) return { mode: 'full', view: TankCamera.fullView(worldW, worldH) };
     if (!self.alive && selfDeadSince !== null && now - selfDeadSince >= DEATH_FULL_VIEW_DELAY) {
       return { mode: 'full', view: TankCamera.fullView(worldW, worldH) };
     }
     return { mode: 'follow', view: TankCamera.computeView(self.x, self.y, worldW, worldH) };
+  }
+
+  // V 键 / 移动端视野按钮：活着时在全图与跟随之间切换。
+  // 阵亡时按键不生效（移动端按钮也随控件一起收起）；已打开的手动全图会保持到复活后。
+  function toggleViewMode() {
+    if (spectating || views.game.classList.contains('hidden')) return;
+    const self = tanks.find((t) => t.id === myId);
+    if (!self || !self.alive) return;
+    fullViewManual = !fullViewManual;
+    draw(); // 立即按新模式重绘一次，过渡动画就从这一刻开始
   }
 
   function draw() {
@@ -2663,19 +2887,21 @@
     // 视野跟随：把视口铺满整个画布，之后所有世界坐标绘制都自动跟着走
     // （包括最后画的暗黑遮罩——它也是按世界坐标画的，同一个变换会把两者对齐）。
     // 正常移动时视口直接贴着坦克，不做平滑（坦克始终在画面中心）；
-    // 只在"阵亡 → 全图"和"复活 → 跟随"这两个模式切换时，对视口矩形做缓入缓出的插值缩放。
+    // 只在"跟随 ⇄ 全图"的模式切换时（阵亡拉远 / 复活推近 / 手动切换），
+    // 对视口矩形做缓入缓出的插值缩放。
     const desired = desiredCamera(now);
     if (desired.mode !== cameraMode) {
       if (cameraMode !== null && lastCameraView) {
         cameraTransition = {
           from: { ...lastCameraView },
           start: now,
-          duration: desired.mode === 'full' ? DEATH_ZOOM_OUT_MS : RESPAWN_ZOOM_IN_MS,
+          duration: desired.mode === 'full' ? VIEW_ZOOM_OUT_MS : VIEW_ZOOM_IN_MS,
         };
       } else {
         cameraTransition = null; // 第一帧 / 新回合：直接到位，不做过渡
       }
       cameraMode = desired.mode;
+      updateViewToggleUi(); // 全图 / 跟随按钮的文字和高亮跟着镜头模式走
     }
     let view = desired.view;
     if (cameraTransition) {
@@ -2709,6 +2935,8 @@
     drawDarkness(); // 必须最后画：视野之外的墙、坦克、子弹、特效统统一片黑
     // 黑幕之后补画自己的昵称/血量/弹药，保证这三项操作必需的信息永远不被遮挡。
     if (dark) drawSelfStatus();
+
+    drawMinimap(); // 独立覆盖层：自带坐标变换，不受上面的相机变换和黑幕影响
 
     ctx.setTransform(1, 0, 0, 1, 0, 0); // 复位，界面类绘制（暂无）保持屏幕坐标
   }
@@ -2754,13 +2982,26 @@
     updateInput();
   });
 
-  // ---------- 移动端：虚拟摇杆 + 移动切换 + 开火按钮 ----------
+  // V：全图 / 跟随视野切换（桌面快捷键；移动端用右侧的视野按钮）。
+  // 只在游戏界面里生效，避免在大厅输入房间名等场景误触；
+  // 带 Ctrl/Cmd/Alt 的组合键（例如粘贴 Ctrl+V）不拦。
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyV' || e.repeat) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (views.game.classList.contains('hidden')) return;
+    const target = e.target;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+    e.preventDefault();
+    toggleViewMode();
+  });
+
+  // ---------- 移动端：虚拟摇杆 + 移动切换 + 视野切换 + 开火按钮 ----------
   // 用 pointer:coarse 判断是否为触屏设备（比单纯看屏幕宽度更可靠，
   // 能避免把触屏笔记本/平板误判，也能兼容小尺寸横屏手机）。
   const isTouchDevice = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 
-  // 自己阵亡、或者重生动画还没播完（坦克还没出现）时，收起摇杆/开火/移动切换：
-  // 这两种状态下按了也没用，露出来只会误触。阵亡时同时清空本地输入，
+  // 自己阵亡、或者重生动画还没播完（坦克还没出现）时，收起摇杆/开火/移动切换/视野切换：
+  // 这些状态下按了也没用，露出来只会误触。阵亡时同时清空本地输入，
   // 免得复活瞬间还带着死前按住的方向。
   //
   // 大乱斗的复活不经过 game_start，所以这里记下自己上一帧是否可操作：
@@ -2910,6 +3151,17 @@
     keyState.left = diff < -TURN_DEADZONE;  // 目标在当前参照朝向的逆时针一侧 -> 左转
     keyState.right = diff > TURN_DEADZONE;  // 目标在当前参照朝向的顺时针一侧 -> 右转
     updateInput();
+  }
+
+  function setupViewToggle() {
+    // 按钮初始文字/高亮与当前镜头模式对齐（新回合复位成跟随）
+    updateViewToggleUi();
+    // 和移动切换一样用 pointerdown：按下即切，不用等 click 合成，
+    // 这样手指还按着摇杆/开火键时，另一根手指也能立刻切视野。
+    btnViewToggle.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      toggleViewMode();
+    });
   }
 
   function setupMoveToggle() {
@@ -3160,6 +3412,7 @@
     document.body.classList.add('is-touch');
     setupJoystick();
     setupMoveToggle();
+    setupViewToggle();
     setupFireButton();
     setupDpad();
   }
