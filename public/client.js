@@ -51,6 +51,8 @@
   const btnHpPlus = document.getElementById('btn-hp-plus');
   const modePickerEl = document.getElementById('mode-picker');
   const modeDescEl = document.getElementById('mode-desc');
+  const btnTeamMode = document.getElementById('btn-team-mode');
+  const btnShuffleTeams = document.getElementById('btn-shuffle-teams');
   const killTargetGroup = document.getElementById('kill-target-group');
   const killTargetLabelEl = document.getElementById('kill-target-label');
   const killTargetInputEl = document.getElementById('kills-input');
@@ -120,14 +122,19 @@
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
   let mapType = 'maze'; // 房间级设置：maze/open/symmetric/scatter/random，以服务端广播为准
   let maxHp = 5; // 房间级设置：每回合初始血量，以服务端广播为准；只有房主能改
-  let mode = 'brawl'; // 房间级设置：brawl=大乱斗 / collect=收集 / capture=占点 / team=团队 / classic=经典
-  let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
-  let captureTarget = 3; // 占点模式胜利所需占领次数，以服务端广播为准
-  let collectTarget = 10; // 收集模式胜利所需钻石数，以服务端广播为准
+  let mode = 'brawl'; // 房间级设置：brawl=大乱斗 / collect=收集 / capture=占点 / classic=经典
+  let teamMode = false; // 房间级开关：对所有模式生效，开启后红蓝分队、胜负按队伍统计
+  let killTarget = 10; // 大乱斗胜利所需击杀数（团队对抗下为队伍总击杀），以服务端广播为准
+  let captureTarget = 3; // 占点模式胜利所需占领次数（团队对抗下为队伍占领数），以服务端广播为准
+  let collectTarget = 10; // 收集模式胜利所需钻石数（团队对抗下为队伍总钻石），以服务端广播为准
   let captureTime = 10; // 占点一次所需秒数，以服务端广播为准（仅用于文案）
-  let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
-  let teamKills = { red: 0, blue: 0 }; // 团队模式：红蓝两队总击杀，以 state / match_end 为准
-  let myTeam = null; // 自己所在队伍（red / blue），非团队模式或观战时为 null
+  let winScore = 5; // 经典模式胜利所需回合数（团队对抗下为队伍胜场），以服务端广播为准
+  // 团队对抗的房间级统计。个人分只用于展示个人贡献，胜负看这些团队分。
+  let teamKills = { red: 0, blue: 0 }; // 大乱斗：队伍总击杀
+  let teamCaptures = { red: 0, blue: 0 }; // 占点：队伍占领次数
+  let teamDiamonds = { red: 0, blue: 0 }; // 收集：队伍总钻石
+  let teamWins = { red: 0, blue: 0 }; // 经典：队伍回合胜场
+  let myTeam = null; // 自己所在队伍（red / blue），团队对抗关闭或观战时为 null
   const MIN_HP = 1;
   const MAX_HP = 10;
   const MIN_KILLS = 5;
@@ -176,11 +183,9 @@
     { key: 'scatter', name: '散块', desc: '随机短墙' },
     { key: 'random', name: '随机', desc: '每回合抽一种' },
   ];
-  // 与服务端 MODES 一一对应。大乱斗是默认模式，团队模式按红蓝两队累计击杀，
-  // 占点模式排在团队模式下面，收集模式收集钻石，经典模式保留原有的淘汰制玩法。
+  // 与服务端 MODES 一一对应。大乱斗是默认模式；团队对抗是独立的房间开关，不是模式。
   const MODE_OPTIONS = [
     { key: 'brawl', name: '大乱斗模式', tagline: '连续混战，抢击杀' },
-    { key: 'team', name: '团队模式', tagline: '红蓝分队，合力抢击杀' },
     { key: 'capture', name: '占点模式', tagline: '抢占随机据点，站圈得分' },
     { key: 'collect', name: '收集模式', tagline: '抢钻石，阵亡掉一半' },
     { key: 'classic', name: '经典模式', tagline: '回合淘汰赛，活到最后' },
@@ -207,7 +212,7 @@
     return key === 'red' ? 'blue' : 'red';
   }
   function isTeamMode() {
-    return mode === 'team';
+    return teamMode;
   }
   function isCaptureMode() {
     return mode === 'capture';
@@ -215,14 +220,35 @@
   function isCollectMode() {
     return mode === 'collect';
   }
-  // 大乱斗、占点模式、收集模式和团队模式都有 10 秒复活；经典模式没有。
+  // 大乱斗、占点模式、收集模式都有 10 秒复活；经典模式没有。团队对抗不改变这一点。
   function hasRespawn() {
-    return mode === 'brawl' || mode === 'capture' || mode === 'collect' || mode === 'team';
+    return mode === 'brawl' || mode === 'capture' || mode === 'collect';
   }
-  // 团队模式下坦克/爆炸统一使用队伍色；个人颜色只在非团队模式使用。
+  // 团队对抗下坦克/爆炸统一使用队伍色；个人颜色只在普通模式使用。
   function displayColor(t) {
     if (isTeamMode() && t && TEAM_META[t.team]) return TEAM_META[t.team].color;
     return (t && t.color) || '#F2FBF9';
+  }
+
+  // 当前模式下团队分用哪一份统计、目标是多少、HUD 里叫什么。
+  // 四个模式共用一个开关，但胜负口径不同，这里集中映射，避免各处散落 if。
+  function teamScoreOf(key) {
+    if (mode === 'capture') return teamCaptures[key] ?? 0;
+    if (mode === 'collect') return teamDiamonds[key] ?? 0;
+    if (mode === 'classic') return teamWins[key] ?? 0;
+    return teamKills[key] ?? 0;
+  }
+  function teamTargetOf() {
+    if (mode === 'capture') return captureTarget;
+    if (mode === 'collect') return collectTarget;
+    if (mode === 'classic') return winScore;
+    return killTarget;
+  }
+  function teamScoreLabel() {
+    if (mode === 'capture') return '占领';
+    if (mode === 'collect') return '钻石';
+    if (mode === 'classic') return '胜场';
+    return '击杀';
   }
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
@@ -426,6 +452,14 @@
   });
 
   btnStart.addEventListener('click', () => send({ type: 'start_game' }));
+  btnTeamMode.addEventListener('click', () => {
+    if (myId !== hostId) return;
+    send({ type: 'set_team_mode', enabled: !isTeamMode() });
+  });
+  btnShuffleTeams.addEventListener('click', () => {
+    if (myId !== hostId) return;
+    send({ type: 'shuffle_teams' });
+  });
   btnLeaveLobby.addEventListener('click', () => {
     send({ type: 'leave_room' });
     resetAfterLeave();
@@ -455,7 +489,7 @@
         spectators = msg.spectators || [];
         spectating = !!msg.spectating;
         // 每次进新房都从零开始，避免上一场大厅残留的团队分/队伍高亮。
-        teamKills = { red: 0, blue: 0 };
+        resetTeamStats();
         myTeam = null;
         // 中途加入的观战者不播开局公告；只有以玩家身份进入下一场时才欠一次展示。
         matchIntroPending = !spectating;
@@ -594,9 +628,10 @@
       case 'state': {
         const prevSpecIds = spectators.map((s) => s.id).join('|');
         spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
+        if (typeof msg.teamMode === 'boolean') teamMode = msg.teamMode;
         const activeChanged = syncPlayersFromTanks(msg.tanks);
         const scoreChanged = syncScoresFromTanks(msg.tanks);
-        const teamChanged = syncTeamKills(msg.teamKills);
+        const teamChanged = syncTeamStats(msg);
         const specChanged = prevSpecIds !== spectators.map((s) => s.id).join('|');
         if (myId) {
           if (players.some((p) => p.id === myId)) spectating = false;
@@ -625,7 +660,7 @@
             kind: 'spawn',
           });
         }
-        // 名单有进出、个人击杀数或团队总击杀变化时立即重建顶部标签。
+        // 名单有进出、个人分或团队分变化时立即重建顶部标签。
         if (activeChanged || specChanged || scoreChanged || teamChanged) renderHud();
         syncSelfState(); // 自己阵亡/观战时收起触屏控件并清空输入
         applyJoystickSteering(); // 用刚收到的最新朝向重新计算该转左还是转右
@@ -691,13 +726,21 @@
       case 'round_end':
         players = msg.scores || players;
         spectators = Array.isArray(msg.spectators) ? msg.spectators : spectators;
+        syncTeamStats(msg);
         renderHud();
         // renderHud 会重建 HUD，死状态（删除线/红心）会丢；用最后一帧坦克状态补回来，
         // 让结算展示期间阵亡玩家继续显示红色 + 删除线。
         renderHudFromTanks();
-        overlayTitle.textContent = msg.winnerId
-          ? `${nameOf(msg.winnerId)} 获胜本回合！`
-          : '平局！';
+        if (isTeamMode() && mode === 'classic') {
+          // 经典团队对抗：winnerTeam 为 null 表示双方同时全灭的平局。
+          overlayTitle.textContent = msg.winnerTeam && TEAM_META[msg.winnerTeam]
+            ? `${teamName(msg.winnerTeam)} 赢下本回合！`
+            : '平局！';
+        } else {
+          overlayTitle.textContent = msg.winnerId
+            ? `${nameOf(msg.winnerId)} 获胜本回合！`
+            : '平局！';
+        }
         // 决胜回合 3 秒后会直接广播 match_end 回大厅，这里不能说"下一回合即将开始"。
         overlaySub.textContent = msg.final
           ? '比赛结束，即将返回房间…'
@@ -729,10 +772,10 @@
         if (msg.reason === 'not_enough_players') {
           overlayTitle.textContent = '对手已离开';
           overlaySub.textContent = '即将返回房间…';
-        } else if (mode === 'team') {
-          // 团队模式：winnerTeam 为 null 表示同 tick 双达标平局。
+        } else if (isTeamMode()) {
+          // 团队对抗：winnerTeam 为 null 表示平局（经典团队双灭等）。
           if (msg.winnerTeam && TEAM_META[msg.winnerTeam]) {
-            overlayTitle.textContent = `🏆 ${teamName(msg.winnerTeam)} 以 ${teamKills[msg.winnerTeam]} 杀赢得整场比赛！`;
+            overlayTitle.textContent = `🏆 ${teamWinText(msg.winnerTeam)}`;
           } else {
             overlayTitle.textContent = '平局！';
           }
@@ -777,14 +820,25 @@
     return p ? p.name : '玩家';
   }
 
+  // 团队整场结算文案：按当前模式把团队分换算成"击杀 / 占领 / 钻石 / 胜场"。
+  function teamWinText(team) {
+    const value = teamScoreOf(team);
+    const who = teamName(team);
+    if (mode === 'capture') return `${who} 以 ${value} 次占领赢得比赛！`;
+    if (mode === 'collect') return `${who} 以 ${value} 颗钻石赢得比赛！`;
+    if (mode === 'classic') return `${who} 以 ${value} 个回合胜场赢得比赛！`;
+    return `${who} 以 ${value} 杀赢得整场比赛！`;
+  }
+
   // 房间级模式设置统一从服务端消息同步，避免 joined / room_update / game_start 各写一套。
-  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 collect / capture / team 会被静默改成大乱斗。
+  // 注意：不能再用"非 classic 即 brawl"的二元判断，否则 collect / capture 会被静默改成大乱斗。
   function syncModeSettings(msg) {
-    if (msg.mode === 'brawl' || msg.mode === 'collect' || msg.mode === 'capture' || msg.mode === 'team' || msg.mode === 'classic') {
+    if (msg.mode === 'brawl' || msg.mode === 'collect' || msg.mode === 'capture' || msg.mode === 'classic') {
       mode = msg.mode;
     } else {
       mode = 'brawl';
     }
+    if (typeof msg.teamMode === 'boolean') teamMode = msg.teamMode;
     if (Number.isInteger(msg.killTarget)) killTarget = msg.killTarget;
     if (Number.isInteger(msg.captureTarget)) captureTarget = msg.captureTarget;
     if (Number.isInteger(msg.collectTarget)) collectTarget = msg.collectTarget;
@@ -792,19 +846,49 @@
     if (Number.isFinite(msg.captureTime)) captureTime = msg.captureTime;
     // 只有消息里显式带了 point 才覆盖：match_end 等消息不带据点，不能把上一帧的据点清掉。
     if (msg.point !== undefined) capturePoint = msg.point || null;
-    if (msg.teamKills && typeof msg.teamKills === 'object') syncTeamKills(msg.teamKills);
+    syncTeamStats(msg);
   }
 
-  // 团队总击杀只在真的变化时返回 true，避免 30Hz 的 state 反复重建 HUD DOM。
-  function syncTeamKills(raw) {
-    if (!raw || typeof raw !== 'object') return false;
-    const next = {
-      red: Number.isFinite(raw.red) ? raw.red : 0,
-      blue: Number.isFinite(raw.blue) ? raw.blue : 0,
+  function normalizeTeamStat(raw) {
+    return {
+      red: raw && Number.isFinite(raw.red) ? raw.red : 0,
+      blue: raw && Number.isFinite(raw.blue) ? raw.blue : 0,
     };
-    if (next.red === teamKills.red && next.blue === teamKills.blue) return false;
-    teamKills = next;
-    return true;
+  }
+
+  function sameTeamStat(a, b) {
+    return a.red === b.red && a.blue === b.blue;
+  }
+
+  // 四类团队统计统一同步：只在真的变化时返回 true，避免 30Hz 的 state 反复重建 HUD DOM。
+  function syncTeamStats(msg) {
+    if (!msg || typeof msg !== 'object') return false;
+    let changed = false;
+    const pairs = [
+      ['teamKills', 'teamKills'],
+      ['teamCaptures', 'teamCaptures'],
+      ['teamDiamonds', 'teamDiamonds'],
+      ['teamWins', 'teamWins'],
+    ];
+    for (const [msgKey, localKey] of pairs) {
+      if (!msg[msgKey] || typeof msg[msgKey] !== 'object') continue;
+      const next = normalizeTeamStat(msg[msgKey]);
+      const current = { teamKills, teamCaptures, teamDiamonds, teamWins }[localKey];
+      if (sameTeamStat(current, next)) continue;
+      if (localKey === 'teamKills') teamKills = next;
+      else if (localKey === 'teamCaptures') teamCaptures = next;
+      else if (localKey === 'teamDiamonds') teamDiamonds = next;
+      else teamWins = next;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function resetTeamStats() {
+    teamKills = { red: 0, blue: 0 };
+    teamCaptures = { red: 0, blue: 0 };
+    teamDiamonds = { red: 0, blue: 0 };
+    teamWins = { red: 0, blue: 0 };
   }
 
   function syncMyTeam() {
@@ -817,7 +901,7 @@
   function detectDeaths(newTanks) {
     newTanks.forEach((t) => {
       if (prevAlive[t.id] && !t.alive) {
-        // 团队模式用队伍色，普通模式用个人色。
+        // 团队对抗用队伍色，普通模式用个人色。
         spawnExplosion(t.x, t.y, displayColor(t));
       } else if (t.alive && prevShield[t.id] && !t.shield) {
         spawnShieldBreak(t.x, t.y);
@@ -911,11 +995,11 @@
         meta.appendChild(host);
       }
 
-      // 模式徽章：列表只突出"这个房间打什么模式"，具体目标数值进房后再看。
+      // 模式徽章：列表只突出"这个房间打什么模式"，团队对抗开启时追加队伍标记。
       if (room.state !== 'lobby') {
         const roomMode = document.createElement('span');
         roomMode.className = 'room-mode';
-        roomMode.textContent = modeName(room.mode);
+        roomMode.textContent = `${modeName(room.mode)}${room.teamMode ? ' · 团队' : ''}`;
         meta.appendChild(roomMode);
       }
 
@@ -943,7 +1027,8 @@
     players = [];
     spectators = [];
     spectating = false;
-    teamKills = { red: 0, blue: 0 };
+    teamMode = false;
+    resetTeamStats();
     myTeam = null;
     roomList = [];
     maze = null;
@@ -993,7 +1078,7 @@
     row.className = 'player-row';
     const dot = document.createElement('span');
     dot.className = 'player-dot';
-    // 团队模式下圆点用队伍色，一眼能看出队友/对手；其他模式保留个人色。
+    // 团队对抗下圆点用队伍色，一眼能看出队友/对手；普通模式保留个人色。
     dot.style.background = isTeamMode() ? teamColor(p.team) : p.color;
     const name = document.createElement('span');
     name.className = 'player-name';
@@ -1035,7 +1120,7 @@
       return;
     }
 
-    // 团队模式按红/蓝分组显示，队伍人数直接写在组标题右侧。
+    // 团队对抗按红/蓝分组显示，队伍人数直接写在组标题右侧。
     const groups = TEAM_KEYS.map((key) => ({ key, list: players.filter((p) => p.team === key) }));
     const unassigned = players.filter((p) => !TEAM_META[p.team]);
     if (unassigned.length > 0) groups.push({ key: null, list: unassigned });
@@ -1086,6 +1171,7 @@
     }
 
     renderModePicker();
+    renderTeamModeSetting();
     renderMapTypePicker();
     renderMapPicker();
     renderHpSetting();
@@ -1093,6 +1179,16 @@
     renderCaptureTargetSetting();
     renderCollectTargetSetting();
     renderWinScoreSetting();
+  }
+
+  // 团队模式勾选框：只做只读渲染，点击后等服务端 room_update 回来再更新。
+  function renderTeamModeSetting() {
+    const amHost = myId === hostId;
+    const on = isTeamMode();
+    btnTeamMode.disabled = !amHost;
+    btnTeamMode.setAttribute('aria-checked', on ? 'true' : 'false');
+    btnShuffleTeams.classList.toggle('hidden', !on);
+    btnShuffleTeams.disabled = !amHost;
   }
 
   // 大厅右侧的地图类型选择：房主可点，其他玩家只能看到当前类型（按钮禁用，保持只读）。
@@ -1161,7 +1257,7 @@
   }
 
   // ---------- 游戏模式 ----------
-  // 大厅右侧的模式选择：大乱斗模式 / 团队模式 / 占点模式 / 收集模式 / 经典模式。
+  // 大厅右侧的模式选择：大乱斗 / 占点 / 收集 / 经典。团队对抗是下面的独立开关。
   // 和地图/血量一样只做只读渲染，点击后等服务端 room_update 回来再改高亮，
   // 保证所有人看到同一份权威状态。
   function renderModePicker() {
@@ -1193,22 +1289,38 @@
       modePickerEl.appendChild(btn);
     });
 
-    if (mode === 'brawl') {
-      modeDescEl.textContent = `所有人连续混战，击毁后还能再上场；先拿到 ${killTarget} 次击杀的人获胜。`;
-    } else if (mode === 'capture') {
-      modeDescEl.textContent = `场上会刷新一个据点；独自站在圈内 ${captureTime} 秒即可占领一次，先占 ${captureTarget} 次的人获胜。`;
-    } else if (mode === 'collect') {
-      modeDescEl.textContent = `捡起场上的钻石来加分；阵亡会掉一半已收集的钻石，先收集 ${collectTarget} 颗的人获胜。`;
-    } else if (mode === 'team') {
-      modeDescEl.textContent = `红蓝两队分头混战，击毁后还能再上场；先拿到 ${killTarget} 次团队击杀的队伍获胜，队友之间不会误伤。`;
-    } else {
-      modeDescEl.textContent = `每回合淘汰制，活到最后的人拿下一回合；先赢 ${winScore} 个回合的人获胜。`;
-    }
-    killTargetGroup.classList.toggle('hidden', mode !== 'brawl' && mode !== 'team');
+    modeDescEl.textContent = modeDescription();
+    killTargetGroup.classList.toggle('hidden', mode !== 'brawl');
     winScoreGroup.classList.toggle('hidden', mode !== 'classic');
   }
 
-  // ---------- 大乱斗 / 团队模式击杀目标 ----------
+  // 模式说明会随团队对抗开关切换：同一个模式，单人/团队两种胜负口径要说清楚。
+  function modeDescription() {
+    if (isTeamMode()) {
+      if (mode === 'capture') {
+        return `红蓝两队抢同一个据点，同队成员合力推进进度；先占领 ${captureTarget} 次的队伍获胜。`;
+      }
+      if (mode === 'collect') {
+        return `钻石计入团队总分，阵亡会掉一半并扣除团队分；先收集 ${collectTarget} 颗的队伍获胜。`;
+      }
+      if (mode === 'classic') {
+        return `每回合淘汰制，淘汰对方全队才算赢下回合；先赢 ${winScore} 个回合的队伍获胜。`;
+      }
+      return `红蓝两队连续混战，队友免伤；先拿到 ${killTarget} 次团队击杀的队伍获胜。`;
+    }
+    if (mode === 'brawl') {
+      return `所有人连续混战，击毁后还能再上场；先拿到 ${killTarget} 次击杀的人获胜。`;
+    }
+    if (mode === 'capture') {
+      return `场上会刷新一个据点；独自站在圈内 ${captureTime} 秒即可占领一次，先占 ${captureTarget} 次的人获胜。`;
+    }
+    if (mode === 'collect') {
+      return `捡起场上的钻石来加分；阵亡会掉一半已收集的钻石，先收集 ${collectTarget} 颗的人获胜。`;
+    }
+    return `每回合淘汰制，活到最后的人拿下一回合；先赢 ${winScore} 个回合的人获胜。`;
+  }
+
+  // ---------- 大乱斗击杀目标 ----------
   function clampKillTarget(v) {
     const n = Math.round(Number(v));
     if (!Number.isFinite(n)) return killTarget;
@@ -1218,16 +1330,16 @@
   function renderKillTargetSetting() {
     const amHost = myId === hostId;
     if (document.activeElement !== killTargetInputEl) killTargetInputEl.value = String(killTarget);
-    // 团队模式下同一个输入框表示"队伍总击杀目标"，标题跟着模式切换。
+    // 团队对抗下同一个输入框表示"队伍总击杀目标"，标题跟着开关切换。
     killTargetLabelEl.textContent = isTeamMode() ? '团队击杀目标' : '击杀目标';
-    const disabled = !amHost || (mode !== 'brawl' && mode !== 'team');
+    const disabled = !amHost || mode !== 'brawl';
     killTargetInputEl.disabled = disabled;
     btnKillsMinus.disabled = disabled;
     btnKillsPlus.disabled = disabled;
   }
 
   function requestKillTarget(value) {
-    if (mode !== 'brawl' && mode !== 'team') return;
+    if (mode !== 'brawl') return;
     const next = clampKillTarget(value);
     killTargetInputEl.value = String(next);
     if (next !== killTarget) send({ type: 'set_kill_target', kills: next });
@@ -1416,15 +1528,25 @@
     clearMatchIntroTimers();
     matchIntroEl.classList.remove('hidden', 'leaving');
     // 先让 live region 可见再写文案，读屏才会把这次公告读出来
-    matchIntroModeEl.textContent = modeName(mode);
-    if (mode === 'brawl') {
+    matchIntroModeEl.textContent = isTeamMode()
+      ? `${modeName(mode)} · 团队对抗`
+      : modeName(mode);
+    if (isTeamMode()) {
+      if (mode === 'capture') {
+        matchIntroGoalEl.textContent = `先占领 ${captureTarget} 次据点`;
+      } else if (mode === 'collect') {
+        matchIntroGoalEl.textContent = `先收集 ${collectTarget} 颗钻石`;
+      } else if (mode === 'classic') {
+        matchIntroGoalEl.textContent = `先赢 ${winScore} 回合`;
+      } else {
+        matchIntroGoalEl.textContent = `先达到 ${killTarget} 次团队击杀`;
+      }
+    } else if (mode === 'brawl') {
       matchIntroGoalEl.textContent = `先达到 ${killTarget} 次击杀`;
     } else if (mode === 'capture') {
       matchIntroGoalEl.textContent = `先占领 ${captureTarget} 次据点`;
     } else if (mode === 'collect') {
       matchIntroGoalEl.textContent = `先收集 ${collectTarget} 颗钻石`;
-    } else if (mode === 'team') {
-      matchIntroGoalEl.textContent = `红蓝对抗 · 先达到 ${killTarget} 次团队击杀`;
     } else {
       matchIntroGoalEl.textContent = `先赢 ${winScore} 回合`;
     }
@@ -1476,7 +1598,7 @@
     item.id = 'hud-' + p.id;
     const dot = document.createElement('span');
     dot.className = 'hud-dot';
-    // 团队模式下 HUD 圆点也用队伍色，和坦克车身保持一致。
+    // 团队对抗下 HUD 圆点也用队伍色，和坦克车身保持一致。
     dot.style.background = isTeamMode() ? teamColor(p.team) : p.color;
     const label = document.createElement('span');
     label.className = 'hud-label';
@@ -1522,7 +1644,7 @@
     return item;
   }
 
-  // 团队模式 HUD：红蓝两块面板，标题显示"队伍总击杀 / 目标"，下面挂队员。
+  // 团队对抗 HUD：红蓝两块面板，标题显示当前模式的团队分 / 目标，下面挂队员。
   function renderTeamHud() {
     const groups = TEAM_KEYS.map((key) => ({
       key,
@@ -1557,7 +1679,8 @@
 
       const score = document.createElement('span');
       score.className = 'hud-team-score';
-      score.textContent = key ? `${teamKills[key] ?? 0} / ${killTarget}` : '';
+      // 同一个位置按模式显示"击杀 / 占领 / 钻石 / 胜场 X / 目标"。
+      score.textContent = key ? `${teamScoreLabel()} ${teamScoreOf(key)} / ${teamTargetOf()}` : '';
       head.appendChild(title);
       head.appendChild(score);
 
@@ -1572,18 +1695,18 @@
 
   function renderHud() {
     hudScores.innerHTML = '';
-    const teamMode = isTeamMode();
-    hudScores.classList.toggle('hud-team-mode', teamMode);
+    const teamActive = isTeamMode();
+    hudScores.classList.toggle('hud-team-mode', teamActive);
 
-    if (teamMode) {
+    if (teamActive) {
       renderTeamHud();
     } else {
       players.forEach((p) => hudScores.appendChild(makeHudPlayerItem(p)));
     }
 
     // 观战者仍然出现在顶部，但不显示血量/分数，用虚线和「观战」徽章区分。
-    // 团队模式下单独占一行，避免混进某个队伍的成员区。
-    if (teamMode && spectators.length > 0) {
+    // 团队对抗下单独占一行，避免混进某个队伍的成员区。
+    if (teamActive && spectators.length > 0) {
       const wrap = document.createElement('div');
       wrap.className = 'hud-spectators';
       spectators.forEach((s) => wrap.appendChild(makeHudSpectatorItem(s)));
@@ -1744,7 +1867,7 @@
     // 重生动画期间：服务端判定这辆坦克还没有实体，所以只画正在凝聚的车身，
     // 名字、血条、护盾环、出生保护环全部等实体出现后再画。
     const spawning = t.spawnAnim > 0;
-    // 团队模式统一用队伍色；普通模式保留每名玩家的个人颜色。
+    // 团队对抗统一用队伍色；普通模式保留每名玩家的个人颜色。
     const bodyColor = displayColor(t);
 
     ctx.save();

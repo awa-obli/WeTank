@@ -135,7 +135,7 @@ function collectLaserHits(points, tanks, options = {}) {
       if (!t.alive) continue;
       // 重生凝聚中的坦克还没有实体，激光直接穿过，不判定命中。
       if ((t.spawnAnimRemaining || 0) > 0) continue;
-      // 团队模式关闭友伤：激光穿过队友，不会停下来，也不消耗护盾。
+      // 团队对抗关闭友伤：激光穿过队友，不会停下来，也不消耗护盾。
       // 但射手自己不受"友伤豁免"保护——反弹回来的射线可以打到自己。
       if (teamMode && ownerTeam && t.team === ownerTeam && t.id !== ownerId) continue;
       if (seen.has(t.id)) continue;

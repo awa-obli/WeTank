@@ -14,6 +14,9 @@
  *     旧进度会继续按 5 秒衰减；
  *   - 圈内没人时旧进度按 10 秒衰减。
  *
+ * 团队对抗使用下面的 stepTeamCapture：进度归属改为队伍，同队多人共享一份进度，
+ * 只有敌我两队同时在圈内才冻结；单人模式继续走 stepCapture，行为完全不变。
+ *
  * 进度状态（point.status）：
  *   idle        圈内没人且进度为 0
  *   capturing   圈内只有一个玩家，正在涨进度
@@ -69,6 +72,8 @@ function createCapturePoint(opts = {}) {
     radius,
     progress: 0,
     ownerId: null,
+    // 团队对抗下据点按队伍归属；普通占点模式恒为 null。
+    ownerTeam: null,
     ownerColor: null,
     status: 'idle',
   };
@@ -170,6 +175,98 @@ function stepCapture(point, occupants, dt) {
   return false;
 }
 
+/**
+ * 团队对抗的据点状态机。
+ *
+ * 与单人版的区别：
+ *   - 进度归属是队伍（point.ownerTeam），不再属于某一名玩家；
+ *   - 同队多人站在圈内不会互相冻结，大家共同推进同一份队伍进度；
+ *   - 敌我两队都在圈内才进入 contested，进度冻结；
+ *   - 圈内只剩敌方队伍时，旧队伍进度按 5 秒清退，清零后由当前队伍继续占。
+ *
+ * @param {object} point 据点对象（原地修改）
+ * @param {Array<{id:string,team:string}>} occupants 圈内的存活实体（调用方已过滤阵亡/凝聚/观战）
+ * @param {number} dt 秒
+ * @param {(p:object)=>string|null} teamOf 取队伍 key 的函数
+ * @param {object} teamColors 队伍配置（用于把进度染成队伍色）
+ * @returns {boolean} 这一帧是否刚好占满 100%
+ */
+function stepTeamCapture(point, occupants, dt, teamOf, teamColors) {
+  if (!point || !(dt > 0)) return false;
+  const getTeam = typeof teamOf === 'function' ? teamOf : (p) => (p ? p.team : null);
+  const colorOf = (team) => (teamColors && teamColors[team] && teamColors[team].color) || null;
+
+  // 圈内出现了哪些队伍（去重）。没有队伍数据的人不参与团队判定。
+  const present = [];
+  for (const p of occupants) {
+    const team = getTeam(p);
+    if ((team === 'red' || team === 'blue') && !present.includes(team)) present.push(team);
+  }
+
+  // 圈内没人：旧进度按 10 秒衰减回 0。
+  if (present.length === 0) {
+    if (point.progress > 0) {
+      point.progress = Math.max(0, point.progress - dt / DECAY_EMPTY_TIME);
+      if (point.progress <= 1e-9) {
+        point.progress = 0;
+        point.ownerTeam = null;
+        point.ownerId = null;
+        point.ownerColor = null;
+        point.status = 'idle';
+      } else {
+        point.status = 'decaying';
+      }
+    } else {
+      point.progress = 0;
+      point.ownerTeam = null;
+      point.ownerId = null;
+      point.ownerColor = null;
+      point.status = 'idle';
+    }
+    return false;
+  }
+
+  // 敌我两队都在圈内：互相牵制，进度冻结。若进度属于其中一队，保留它的归属和颜色，
+  // 只是不再增长；本来就没有进度则保持中立。
+  if (present.length >= 2) {
+    point.status = 'contested';
+    point.ownerId = null;
+    if (!point.ownerTeam || point.progress <= 0) {
+      point.progress = 0;
+      point.ownerTeam = null;
+      point.ownerColor = null;
+    }
+    return false;
+  }
+
+  const team = present[0];
+
+  // 圈内只剩另一队：先把旧队伍的进度按 5 秒清退，清零后下一帧再由当前队伍开始占。
+  if (point.ownerTeam && point.ownerTeam !== team && point.progress > 0) {
+    point.progress = Math.max(0, point.progress - dt / DECAY_NEUTRALIZE_TIME);
+    point.status = 'neutralizing';
+    point.ownerId = null;
+    if (point.progress <= 1e-9) {
+      point.progress = 0;
+      point.ownerTeam = null;
+      point.ownerColor = null;
+    }
+    return false;
+  }
+
+  // 圈内只剩一支队伍：同队多人共享同一份进度，不因人数增加而冻结或加速。
+  point.ownerTeam = team;
+  point.ownerId = null;
+  point.ownerColor = colorOf(team) || point.ownerColor;
+  point.status = 'capturing';
+  point.progress = Math.min(1, point.progress + dt / CAPTURE_TIME);
+  if (point.progress >= 1 - 1e-9) {
+    point.progress = 1;
+    return true;
+  }
+  return false;
+}
+
 module.exports = {
   CAPTURE_RADIUS,
   CAPTURE_TIME,
@@ -179,4 +276,5 @@ module.exports = {
   pickCaptureSpot,
   createCapturePoint,
   stepCapture,
+  stepTeamCapture,
 };

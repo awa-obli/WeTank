@@ -158,7 +158,7 @@
         </div>
       </div>
 
-      <!-- 右列：游戏设置（模式与胜负目标、地图类型与大小、初始血量） -->
+      <!-- 右列：游戏设置（模式与团队模式、胜负目标、地图类型与大小、初始血量） -->
       <aside class="lobby-side">
         <div class="settings-panel">
           <h2 class="settings-title">游戏设置</h2>
@@ -166,6 +166,11 @@
           <div class="settings-group">
             <span class="settings-label">游戏模式</span>
             <div id="mode-picker" class="mode-picker" role="group" aria-label="游戏模式"></div>
+            <button id="btn-team-mode" class="team-mode-row" type="button" role="checkbox" aria-checked="false" aria-label="团队模式开关" disabled>
+              <span class="team-mode-box" aria-hidden="true"></span>
+              <span class="team-mode-name">团队模式</span>
+            </button>
+            <button id="btn-shuffle-teams" class="map-option team-shuffle hidden" type="button">重新分队</button>
             <p id="mode-desc" class="mode-desc"></p>
           </div>
           <div id="kill-target-group" class="settings-group hidden">

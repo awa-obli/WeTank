@@ -415,7 +415,7 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 .player-name { font-weight: 600; flex: 1; }
 .player-tag { font-size: 11px; color: var(--ink); background: var(--yellow); padding: 2px 8px; border-radius: 6px; font-weight: 700; }
 
-/* 团队模式：玩家列表按红/蓝分组；徽章与「换队」按钮都保持单行不换行 */
+/* 团队对抗：玩家列表按红/蓝分组；徽章与「换队」按钮都保持单行不换行 */
 .lobby-team-section { display: flex; flex-direction: column; gap: 8px; }
 .lobby-team-section + .lobby-team-section { margin-top: 12px; }
 .lobby-team-head {
@@ -542,6 +542,34 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   font-size: 11px; font-weight: 600; line-height: 1.5;
 }
 
+/* 团队模式勾选框：紧跟在模式选项下方，右侧文字；开启时方块填充黄色并出现勾 */
+.team-mode-row {
+  display: flex; align-items: center; gap: 9px;
+  margin-top: 12px; padding: 6px 2px;
+  background: none; border: none; color: var(--text);
+  appearance: none; -webkit-appearance: none;
+  font: inherit; text-align: left;
+  cursor: pointer;
+}
+.team-mode-box {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  border: 2px solid var(--ink); border-radius: 5px;
+  background: var(--bg);
+  box-shadow: 2px 2px 0 rgba(6, 17, 15, 0.55);
+  color: var(--ink);
+  font: 800 14px/1 'Space Grotesk', sans-serif;
+  transition: background .12s ease;
+}
+.team-mode-row[aria-checked="true"] .team-mode-box { background: var(--yellow); }
+.team-mode-row[aria-checked="true"] .team-mode-box::after { content: '✓'; }
+.team-mode-name { font-size: 14px; font-weight: 700; }
+.team-mode-row:not(:disabled):hover .team-mode-box { border-color: var(--green); }
+.team-mode-row:disabled { cursor: not-allowed; opacity: .55; }
+.team-mode-row:disabled[aria-checked="true"] { opacity: .85; }
+.team-shuffle { margin-top: 10px; }
+
 /* 初始血量：数字输入 + 两侧 −/+ 微调；非房主整组禁用，只读显示当前值 */
 .settings-group + .settings-group { margin-top: 18px; }
 .hp-control { display: flex; align-items: center; gap: 8px; }
@@ -620,7 +648,7 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
   font-size: 11px; font-weight: 800; letter-spacing: .04em;
 }
 
-/* 团队模式 HUD：红蓝两块面板，标题是队伍总击杀/目标，下面是队员；
+/* 团队对抗 HUD：红蓝两块面板，标题是当前模式的团队分/目标，下面是队员；
    观战者单独占满一行，避免混进某个队伍的成员区。 */
 .hud.hud-team-mode {
   display: grid;
