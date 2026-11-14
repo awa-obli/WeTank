@@ -140,7 +140,7 @@ test('收集模式常量与默认值', () => {
   assert.equal(MODES.brawl.name, '大乱斗模式');
   assert.equal(MODES.collect.name, '收集模式');
   assert.equal(DEFAULT_COLLECT_TARGET, 10);
-  assert.equal(MIN_COLLECT_TARGET, 1);
+  assert.equal(MIN_COLLECT_TARGET, 5);
   assert.equal(MAX_COLLECT_TARGET, 30);
   assert.equal(COLLECT_INITIAL_DIAMONDS, 2);
   assert.equal(COLLECT_DIAMONDS_ON_FIELD, 5);
@@ -343,18 +343,19 @@ test('达到收集目标：广播 match_end，不广播 round_end', () => {
   const { room, sockets } = makeRoom(2);
   try {
     const [a, b] = [...room.players.values()];
-    room.collectTarget = 1;
+    room.collectTarget = 5;
     room.diamonds = [];
+    a.score = 4;
     diamondAt(room, a.x, a.y);
     room.tick();
 
-    assert.equal(a.score, 1);
+    assert.equal(a.score, 5);
     const matchEnd = sockets[0].messages.find((m) => m.type === 'match_end');
     assert.ok(matchEnd, '达到收集目标应广播 match_end');
     assert.equal(matchEnd.winnerId, a.id);
     assert.equal(matchEnd.mode, 'collect');
-    assert.equal(matchEnd.collectTarget, 1);
-    assert.equal(matchEnd.scores.find((s) => s.id === a.id).score, 1);
+    assert.equal(matchEnd.collectTarget, 5);
+    assert.equal(matchEnd.scores.find((s) => s.id === a.id).score, 5);
     assert.equal(room.state, 'lobby');
     assert.equal(sockets[0].messages.filter((m) => m.type === 'round_end').length, 0);
   } finally {

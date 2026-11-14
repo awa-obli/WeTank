@@ -1,12 +1,12 @@
 'use strict';
 
 // 占点模式的确定性单元测试（不监听网络端口，直接驱动 Room）：
-//   1. 默认值 / 常量：12 秒占领、无人 12 秒衰减、换人 6 秒清进度、默认占领目标 3；
+//   1. 默认值 / 常量：10 秒占领、无人 10 秒衰减、换人 5 秒清进度、默认占领目标 3；
 //   2. 开局生成据点：圆心完全随机、整个圆在世界内、出生点不在圈内；
 //   3. 单人站圈进度按 CAPTURE_TIME 匀速上涨，state 同步 owner/progress；
 //   4. 圈内 >=2 人且原 owner 在圈内时进度冻结；owner 离开后圈内多人也不能冻结；
-//   5. 圈内没人时进度按 12 秒衰减到 0；
-//   6. 换人/owner 离开后旧进度按 6 秒清退，归零后下一 tick 才轮到新玩家；
+//   5. 圈内没人时进度按 10 秒衰减到 0；
+//   6. 换人/owner 离开后旧进度按 5 秒清退，归零后下一 tick 才轮到新玩家；
 //   7. 占满一次得 1 分并随机换点，换点后进度清零；
 //   8. 达到 captureTarget 后广播 match_end，不再换点；
 //   9. 阵亡 / 凝聚动画中 / 观战者不参与占点；出生保护不解除也能占点；
@@ -31,9 +31,9 @@ const {
 } = require('../server');
 
 const TICK = 1 / 30;
-const CAPTURE_TICKS = Math.round(CAPTURE_TIME / TICK); // 12 秒 = 360 tick
-const DECAY_EMPTY_TICKS = Math.round(DECAY_EMPTY_TIME / TICK); // 12 秒 = 360 tick
-const DECAY_NEUTRALIZE_TICKS = Math.round(DECAY_NEUTRALIZE_TIME / TICK); // 6 秒 = 180 tick
+const CAPTURE_TICKS = Math.round(CAPTURE_TIME / TICK); // 10 秒 = 300 tick
+const DECAY_EMPTY_TICKS = Math.round(DECAY_EMPTY_TIME / TICK); // 10 秒 = 300 tick
+const DECAY_NEUTRALIZE_TICKS = Math.round(DECAY_NEUTRALIZE_TIME / TICK); // 5 秒 = 150 tick
 
 function makeWs() {
   const messages = [];
@@ -132,9 +132,9 @@ test('占点模式：常量、默认占领目标、默认模式仍是大乱斗',
   assert.equal(DEFAULT_MODE, 'brawl');
   assert.equal(MODES.capture.name, '占点模式');
   assert.equal(CAPTURE_RADIUS, 80);
-  assert.equal(CAPTURE_TIME, 12);
-  assert.equal(DECAY_EMPTY_TIME, 12);
-  assert.equal(DECAY_NEUTRALIZE_TIME, 6);
+  assert.equal(CAPTURE_TIME, 10);
+  assert.equal(DECAY_EMPTY_TIME, 10);
+  assert.equal(DECAY_NEUTRALIZE_TIME, 5);
   assert.equal(DEFAULT_CAPTURE_TARGET, 3);
   assert.equal(MIN_CAPTURE_TARGET, 1);
   assert.equal(MAX_CAPTURE_TARGET, 10);
@@ -207,7 +207,7 @@ test('争夺：圈内 >=2 人且原 owner 在圈内时进度冻结，走掉一�
   assert.ok(room.point.progress > before, '对手离开后应继续上涨');
 });
 
-test('无人圈内：进度按 12 秒逐渐衰减到 0', () => {
+test('无人圈内：进度按 10 秒逐渐衰减到 0', () => {
   const { room } = makeRoom(2);
   const [a, b] = [...room.players.values()];
   room.point.progress = 1;
@@ -218,17 +218,17 @@ test('无人圈内：进度按 12 秒逐渐衰减到 0', () => {
   placeFar(room, b);
 
   for (let i = 0; i < DECAY_EMPTY_TICKS - 1; i++) room.tick();
-  assert.ok(room.point.progress > 0, '12 秒未到不应清零');
+  assert.ok(room.point.progress > 0, '10 秒未到不应清零');
   assert.equal(room.point.ownerId, a.id, '衰减期间保留 owner 颜色');
 
-  room.tick(); // 第 360 tick
+  room.tick(); // 第 300 tick
   assert.equal(room.point.progress, 0);
   assert.equal(room.point.ownerId, null);
   assert.equal(room.point.ownerColor, null);
   assert.equal(room.point.status, 'idle');
 });
 
-test('换人：旧进度按 6 秒清空，归零后下一 tick 才开始新进度', () => {
+test('换人：旧进度按 5 秒清空，归零后下一 tick 才开始新进度', () => {
   const { room } = makeRoom(2);
   const [a, b] = [...room.players.values()];
   room.point.progress = 1;
@@ -237,17 +237,17 @@ test('换人：旧进度按 6 秒清空，归零后下一 tick 才开始新进�
   placeFar(room, a);
   placeAt(room, b, 0, 0);
 
-  for (let i = 0; i < 30; i++) room.tick(); // 1 秒，清掉 1/6
+  for (let i = 0; i < 30; i++) room.tick(); // 1 秒，清掉 1/5
   assert.equal(room.point.ownerId, a.id, '旧进度没清完前 owner 仍是 a');
   assert.equal(room.point.status, 'neutralizing');
-  assert.ok(room.point.progress > 0.8 && room.point.progress < 1);
+  assert.ok(room.point.progress >= 0.8 - 1e-6 && room.point.progress < 1);
 
-  // 0~30 已经跑过，继续跑到第 179 tick：仍未清零
+  // 0~30 已经跑过，继续跑到第 149 tick：仍未清零
   for (let i = 30; i < DECAY_NEUTRALIZE_TICKS - 1; i++) room.tick();
-  assert.ok(room.point.progress > 0, '6 秒未到不应清零');
+  assert.ok(room.point.progress > 0, '5 秒未到不应清零');
   assert.equal(room.point.ownerId, a.id);
 
-  room.tick(); // 第 180 tick：清零
+  room.tick(); // 第 150 tick：清零
   assert.equal(room.point.progress, 0);
   assert.equal(room.point.ownerId, null, '清零后才允许换 owner');
 
@@ -267,13 +267,13 @@ test('原占领者不在圈内时，圈内多人也不能替他冻结进度', ()
   placeAt(room, b, -20, 0);
   placeAt(room, c, 20, 0);
 
-  // a 已经离开/阵亡，b+c 两个人在圈内：进度必须继续按 6 秒衰减，而不是冻结。
+  // a 已经离开/阵亡，b+c 两个人在圈内：进度必须继续按 5 秒衰减，而不是冻结。
   for (let i = 0; i < 30; i++) room.tick(); // 1 秒
   assert.equal(room.point.status, 'neutralizing', 'owner 不在圈内时多人也不能冻结进度');
   assert.equal(room.point.ownerId, a.id, '旧 owner 颜色保留到进度清零');
   assert.ok(room.point.progress > 0 && room.point.progress < 0.5);
 
-  // 0.5 按 6 秒清完需要 3 秒，再跑 2 秒到 0
+  // 0.5 按 5 秒清完需要 2.5 秒，再跑 2 秒足够清零
   for (let i = 0; i < 60; i++) room.tick();
   assert.equal(room.point.progress, 0);
   assert.equal(room.point.ownerId, null);
@@ -297,7 +297,7 @@ test('占满一次：得 1 分并随机换点，进度清零、比赛继续', ()
   assert.equal(a.score, 0);
 
   const oldPoint = { ...room.point };
-  room.tick(); // 第 360 tick：占满
+  room.tick(); // 第 300 tick：占满
 
   assert.equal(a.score, 1, '占领一次得 1 分');
   assert.equal(room.state, 'playing', '没到目标应继续比赛');

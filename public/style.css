@@ -607,8 +607,8 @@ h1, h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; margin: 0; }
 /* 阵亡后爱心和血量数字固定红色，并保留 .hud-item.dead 的删除线/淡化 */
 .hud-item.dead .hud-hp { color: var(--red); }
 .hud-item.dead { opacity: .4; }
-/* 删除线只画在昵称/比分上，血量区域（爱心 + 数字）保持干净 */
-.hud-item.dead .hud-label { text-decoration: line-through; }
+/* 删除线只画在昵称上，比分数字保持清晰可读 */
+.hud-item.dead .hud-name { text-decoration: line-through; }
 
 /* 观战者标签：仍出现在顶部，但用虚线、弱化颜色和「观战」徽章与正式玩家区分 */
 .hud-item-spectator { border-style: dashed; opacity: .72; background: transparent; }

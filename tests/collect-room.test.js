@@ -2,7 +2,7 @@
 
 // 收集模式的 WebSocket 端到端测试（需要先启动服务端，默认连 ws://127.0.0.1:8080）：
 //   1. 默认仍是大乱斗，默认收集目标 10；
-//   2. 可切到收集模式；非房主 / 非收集模式 / 非法值不能改收集目标；
+//   2. 可切到收集模式；非房主 / 非收集模式 / 非法值（含小于 5）不能改收集目标；
 //   3. 收集模式下不能改击杀目标、占领目标、经典胜利分数；
 //   4. 开局 game_start / state 带收集目标和开局 2 颗钻石；
 //   5. 房间列表显示收集模式徽章；
@@ -110,7 +110,7 @@ async function main() {
   const notHost = await waitForMsg(guest.client, (m) => m.type === 'error', 'error(非房主改收集目标)');
   check(/房主/.test(notHost.message), `非房主修改收集目标被拒绝：${notHost.message}`);
 
-  for (const [bad, label] of [[0, '0'], [31, '31'], [2.5, '2.5'], ['abc', 'abc']]) {
+  for (const [bad, label] of [[0, '0'], [4, '4'], [31, '31'], [2.5, '2.5'], ['abc', 'abc']]) {
     send(host.client, { type: 'set_collect_target', target: bad });
     const err = await waitForMsg(host.client, (m) => m.type === 'error', `error(收集目标 ${label})`);
     check(/收集目标/.test(err.message), `非法收集目标 ${label} 被拒绝：${err.message}`);
@@ -164,7 +164,7 @@ async function main() {
   const inGameMode = await waitForMsg(host.client, (m) => m.type === 'error', 'error(对局中改模式)');
   check(/游戏进行中/.test(inGameMode.message), `对局中禁止修改模式：${inGameMode.message}`);
 
-  send(host.client, { type: 'set_collect_target', target: 4 });
+  send(host.client, { type: 'set_collect_target', target: 5 });
   const inGameTarget = await waitForMsg(host.client, (m) => m.type === 'error', 'error(对局中改收集目标)');
   check(/游戏进行中/.test(inGameTarget.message), `对局中禁止修改收集目标：${inGameTarget.message}`);
 

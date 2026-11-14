@@ -11,25 +11,25 @@
  *   - 圆圈允许跨墙，圆心甚至可能落在墙体附近；是否在圈内按坦克中心判定；
  *   - 单人站在圈内开始涨进度；只有"圈内 >=2 个存活实体，并且原 owner 本人也在圈内"
  *     时进度才冻结。原 owner 阵亡/离开后，哪怕圈里挤了两个人也不能替他守进度，
- *     旧进度会继续按 6 秒衰减；
- *   - 圈内没人时旧进度按 12 秒衰减。
+ *     旧进度会继续按 5 秒衰减；
+ *   - 圈内没人时旧进度按 10 秒衰减。
  *
  * 进度状态（point.status）：
  *   idle        圈内没人且进度为 0
  *   capturing   圈内只有一个玩家，正在涨进度
  *   contested   圈内 >=2 人且原 owner 在圈内（或还没有 owner），进度冻结/保持 0
- *   neutralizing 圈内有人，但原 owner 不在圈内，旧进度按 6 秒清退
- *   decaying    圈内没人，旧进度按 12 秒衰减
+ *   neutralizing 圈内有人，但原 owner 不在圈内，旧进度按 5 秒清退
+ *   decaying    圈内没人，旧进度按 10 秒衰减
  */
 
 // 据点半径（世界坐标 px）。直径 160px，比坦克直径 30px 大不少。
 const CAPTURE_RADIUS = 80;
 // 单人从 0 占满 100% 所需秒数。
-const CAPTURE_TIME = 12;
+const CAPTURE_TIME = 10;
 // 圈内没人时，旧进度从 100% 衰减到 0 所需秒数。
-const DECAY_EMPTY_TIME = 12;
+const DECAY_EMPTY_TIME = 10;
 // 圈内有人、但原 owner 不在圈内时，清掉旧进度所需秒数（比无人衰减更快）。
-const DECAY_NEUTRALIZE_TIME = 6;
+const DECAY_NEUTRALIZE_TIME = 5;
 
 /** 坦克中心是否在据点圆内。 */
 function isInside(point, x, y) {
@@ -99,7 +99,7 @@ function stepCapture(point, occupants, dt) {
     return false;
   }
 
-  // 没人：旧进度按 12 秒 / 100% 的速度回退到 0。
+  // 没人：旧进度按 10 秒 / 100% 的速度回退到 0。
   if (occupants.length === 0) {
     if (point.progress > 0) {
       point.progress = Math.max(0, point.progress - dt / DECAY_EMPTY_TIME);
@@ -121,7 +121,7 @@ function stepCapture(point, occupants, dt) {
   }
 
   // 原 owner 不在圈内，但圈内有人（1 人或多人）：
-  // 旧进度按 6 秒 / 100% 清退，谁都别想替不在场的人保住它。
+  // 旧进度按 5 秒 / 100% 清退，谁都别想替不在场的人保住它。
   if (point.ownerId && !ownerInside && point.progress > 0) {
     point.progress = Math.max(0, point.progress - dt / DECAY_NEUTRALIZE_TIME);
     point.status = 'neutralizing';

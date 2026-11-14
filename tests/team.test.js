@@ -223,10 +223,13 @@ test('追踪弹只锁定敌人：队友更近也不拐向队友', () => {
     // 去掉墙体干扰，只验证追踪目标选择。
     room.maze.rects = [];
     room.bullets = [];
-    const [a, , c, b] = [...room.players.values()]; // a/c 红，b 蓝
+    const [a, d, c, b] = [...room.players.values()]; // a/c 红，b/d 蓝
     a.x = 100; a.y = 100; a.angle = 0;
     c.x = 150; c.y = 100; c.angle = 0; // 队友更近（50px）
     b.x = 100; b.y = 300; b.angle = 0; // 敌人较远（200px）
+    // 另一个蓝队敌人放在远处，避免它的随机出生点比 b 更近、抢走追踪目标，
+    // 让这条用例只验证"队友更近也不追队友"。
+    d.x = 900; d.y = 600; d.angle = 0;
 
     const cHp = c.hp;
     room.bullets.push({

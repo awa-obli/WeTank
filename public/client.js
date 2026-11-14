@@ -107,12 +107,14 @@
   let matchIntroPending = false;
   let matchIntroTimer = null;
   let matchIntroHideTimer = null;
+  // 整场结算遮罩期间保持最后一帧 HUD，不把服务端刚转正的观战者立刻画进队伍区块。
+  let matchEndOverlayActive = false;
   const NICKNAME_KEY = 'tank.nickname';
   // 触屏虚拟按键的控制方式：joystick=摇杆（默认）/ dpad=十字键，只保存在本机
   const CONTROL_MODE_KEY = 'tank.controlMode';
   const CONTROL_MODE_INFO = {
     joystick: '拖动摇杆指向想去的方向，坦克会自动转向；用右侧「移动/静止」切换前进或只转向。',
-    dpad: '十字键：◀ ▶ 原地转向，▲ 前进，▼ 后退。上下键直接控制前进/后退，不需要「移动/静止」切换。',
+    dpad: '十字键：◀ ▶ 原地转向，▲ 前进，▼ 后退。',
   };
   let controlMode = 'joystick';
   let mapSize = 'medium'; // 房间级设置，以服务端广播为准；只有房主能改（不进入房间列表）
@@ -122,7 +124,7 @@
   let killTarget = 10; // 大乱斗 / 团队模式胜利所需击杀数，以服务端广播为准
   let captureTarget = 3; // 占点模式胜利所需占领次数，以服务端广播为准
   let collectTarget = 10; // 收集模式胜利所需钻石数，以服务端广播为准
-  let captureTime = 12; // 占点一次所需秒数，以服务端广播为准（仅用于文案）
+  let captureTime = 10; // 占点一次所需秒数，以服务端广播为准（仅用于文案）
   let winScore = 5; // 经典模式胜利所需回合数，以服务端广播为准
   let teamKills = { red: 0, blue: 0 }; // 团队模式：红蓝两队总击杀，以 state / match_end 为准
   let myTeam = null; // 自己所在队伍（red / blue），非团队模式或观战时为 null
@@ -132,7 +134,7 @@
   const MAX_KILLS = 30;
   const MIN_CAPTURE_TARGET = 1;
   const MAX_CAPTURE_TARGET = 10;
-  const MIN_COLLECT_TARGET = 1;
+  const MIN_COLLECT_TARGET = 5;
   const MAX_COLLECT_TARGET = 30;
   const MIN_WIN_SCORE = 1;
   const MAX_WIN_SCORE = 10;
@@ -508,9 +510,13 @@
         lobbyNameEl.textContent = roomName || '未命名房间';
         renderLobby();
         // 游戏中玩家进出不一定伴随 state 变化，这里立即按最新名单重建顶部标签。
+        // 整场结算遮罩期间例外：此时服务端已把观战者转正，重建会把观战者塞进队伍区块，
+        // 因此沿用遮罩前最后一帧 HUD，等 2.5 秒结算结束回大厅后再按新名单处理。
         if (!views.game.classList.contains('hidden')) {
-          renderHud();
-          renderHudFromTanks();
+          if (!matchEndOverlayActive) {
+            renderHud();
+            renderHudFromTanks();
+          }
           updateSpectatorUi();
         }
         break;
@@ -558,6 +564,7 @@
         myAmmoMax = AMMO_MAX;
         myAmmoReload = 0;
         overlayRound.classList.add('hidden');
+        matchEndOverlayActive = false;
         respawnBanner.classList.add('hidden');
         resetMoveToggleForRespawn();
         renderHud();
@@ -699,6 +706,7 @@
         break;
 
       case 'match_end':
+        matchEndOverlayActive = true;
         players = msg.scores || players;
         spectators = Array.isArray(msg.spectators) ? msg.spectators : [];
         if (msg.hostId) hostId = msg.hostId;
@@ -710,7 +718,9 @@
         }
         syncMyTeam();
         updateSpectatorUi();
-        renderHud();
+        // 关键：这里不能重建 HUD。服务端在 match_end 里已经把观战者转正，
+        // 如果按新名单重绘，观战者会立刻从"观战"行跳进红蓝队伍区块；
+        // 保留最后一帧 HUD（参赛名单 + 观战行），等遮罩结束回大厅后下一局再重建。
         renderHudFromTanks();
         respawnBanner.classList.add('hidden');
         // 整场结束：收掉可能还在播的开局公告，并给下一场重新记一次展示机会。
@@ -751,6 +761,7 @@
         }
         overlayRound.classList.remove('hidden');
         setTimeout(() => {
+          matchEndOverlayActive = false;
           overlayRound.classList.add('hidden');
           capturePoint = null;
           pointCaptureFx = [];
@@ -958,6 +969,7 @@
     hudScores.replaceChildren();
     hudScores.classList.remove('hud-team-mode');
     matchIntroPending = false;
+    matchEndOverlayActive = false;
     hideMatchIntro();
     spectatorBanner.classList.add('hidden');
     respawnBanner.classList.add('hidden');
@@ -1468,7 +1480,15 @@
     dot.style.background = isTeamMode() ? teamColor(p.team) : p.color;
     const label = document.createElement('span');
     label.className = 'hud-label';
-    label.textContent = `${p.name} · ${p.score}`;
+    // 昵称和比分拆成两个 span：阵亡删除线只画在昵称上，比分数字保持清晰可读。
+    const name = document.createElement('span');
+    name.className = 'hud-name';
+    name.textContent = p.name;
+    const score = document.createElement('span');
+    score.className = 'hud-score';
+    score.textContent = ` · ${p.score}`;
+    label.appendChild(name);
+    label.appendChild(score);
     const hp = document.createElement('span');
     hp.className = 'hud-hp';
     hp.id = 'hud-hp-' + p.id;

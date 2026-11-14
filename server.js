@@ -97,7 +97,7 @@ const BULLET_SUB_DT = DT / BULLET_SUBSTEPS;
 // brawl（大乱斗）是默认模式：单局连续死斗，阵亡 10 秒后在随机位置复活，
 // 先达到房间设置的击杀目标者获胜；team（团队模式）同样复活，但按红蓝两队累计击杀，
 // 先达到目标的队伍获胜；capture（占点模式）也沿用复活节奏，目标改为占据场上唯一的据点：
-// 单人站圈 12 秒占领一次得 1 分，据点随后随机换位，先达到房间设置的占领目标者获胜；
+// 单人站圈 10 秒占领一次得 1 分，据点随后随机换位，先达到房间设置的占领目标者获胜；
 // collect（收集模式）同样阵亡复活，目标是收集地图上的钻石，先达到收集目标者获胜；
 // classic（经典模式）保留原玩法：淘汰制回合计分。
 const MODES = {
@@ -148,8 +148,9 @@ const MAX_WIN_SCORE = 10;
 // 开局在场上放 2 颗钻石，之后每 10 秒自动补 1 颗，自动刷新上限 5 颗。
 // 阵亡会掉落已收集钻石的一半（向下取整），掉落的钻石不受自动刷新上限限制——
 // 它们会额外落在死亡位置附近，之后自动刷新会暂停，直到场上数量降回 5 颗以下。
+// 收集目标默认 10 颗，房主可在 5–30 颗之间调整。
 const DEFAULT_COLLECT_TARGET = 10;
-const MIN_COLLECT_TARGET = 1;
+const MIN_COLLECT_TARGET = 5;
 const MAX_COLLECT_TARGET = 30;
 const COLLECT_INITIAL_DIAMONDS = 2;
 const COLLECT_DIAMONDS_ON_FIELD = 5;

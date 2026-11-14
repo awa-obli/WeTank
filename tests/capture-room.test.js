@@ -1,7 +1,7 @@
 'use strict';
 
 // 占点模式的端到端测试（需要先启动服务端，默认连 ws://127.0.0.1:8080）：
-//   1. 默认仍是大乱斗；可切到占点模式，默认占领目标 3、占点时长 12 秒；
+//   1. 默认仍是大乱斗；可切到占点模式，默认占领目标 3、占点时长 10 秒；
 //   2. 非房主 / 非占点模式 / 非法值不能改占领目标；占点模式下不能改击杀目标或经典胜利分数；
 //   3. 开局 game_start 带据点（圆心在格心、整个圆在世界内、半径 60、进度 0）；
 //   4. state 带据点，且所有玩家出生点都不在据点圈内；
@@ -86,7 +86,7 @@ async function main() {
   const host = await createRoom('房主');
   check(host.joined.mode === 'brawl', `新房默认仍是大乱斗（实际 ${host.joined.mode}）`);
   check(host.joined.captureTarget === 3, `默认占领目标 3（实际 ${host.joined.captureTarget}）`);
-  check(host.joined.captureTime === 12, `默认占点时长 12 秒（实际 ${host.joined.captureTime}）`);
+  check(host.joined.captureTime === 10, `默认占点时长 10 秒（实际 ${host.joined.captureTime}）`);
 
   // 还不是占点模式时不能设置占领目标
   send(host.client, { type: 'set_capture_target', target: 5 });
@@ -104,7 +104,7 @@ async function main() {
   const guest = await joinRoom('队员', host.joined.code);
   check(guest.joined.mode === 'capture', '新玩家同步占点模式');
   check(guest.joined.captureTarget === 3, '新玩家同步占领目标');
-  check(guest.joined.captureTime === 12, '新玩家同步占点时长');
+  check(guest.joined.captureTime === 10, '新玩家同步占点时长');
   await waitForMsg(host.client, (m) => m.type === 'room_update' && m.players.length === 2, 'room_update(2人)');
 
   // ---------- 权限与参数校验 ----------
@@ -141,7 +141,7 @@ async function main() {
   const start = await waitForMsg(host.client, (m) => m.type === 'game_start', 'game_start');
   check(start.mode === 'capture', `game_start 带占点模式（实际 ${start.mode}）`);
   check(start.captureTarget === 5, `game_start 带占领目标 5（实际 ${start.captureTarget}）`);
-  check(start.captureTime === 12, `game_start 带占点时长 12（实际 ${start.captureTime}）`);
+  check(start.captureTime === 10, `game_start 带占点时长 10（实际 ${start.captureTime}）`);
   check(!!start.point, 'game_start 带据点');
   const point = start.point;
   check(point && point.progress === 0, `开局据点进度为 0（实际 ${point && point.progress}）`);
