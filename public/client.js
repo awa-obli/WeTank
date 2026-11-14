@@ -251,6 +251,8 @@
     return '击杀';
   }
   const SELF_INVISIBLE_ALPHA = 0.35; // 自己隐身时，自己视角看到的半透明程度
+  // 团队对抗下队友子弹的不透明度：压低队友弹，敌方子弹保持满亮度，敌我一眼可分。
+  const TEAMMATE_BULLET_ALPHA = 0.6;
   const TANK_RADIUS = 15; // 仅用于绘制光环/角标的偏移，需与服务端坦克半径保持一致
   const SPAWN_PROTECT_TIME = 3; // 与服务端 SPAWN_PROTECT_TIME 一致，用于把剩余秒数换算成进度弧比例
   const SPAWN_ANIM_SCALE = 5; // 重生动画的起始放大倍数，收缩到正常 1 倍
@@ -2077,6 +2079,18 @@
   }
 
   function drawBullet(b) {
+    // 团队对抗下弱化队友的子弹。
+    const owner = tanks.find((t) => t.id === b.owner);
+    const isTeammateBullet = isTeamMode()
+      && !!myTeam
+      && b.owner !== myId
+      && !!owner
+      && owner.team === myTeam;
+
+    if (isTeammateBullet) {
+      ctx.save();
+      ctx.globalAlpha *= TEAMMATE_BULLET_ALPHA;
+    }
     ctx.beginPath();
     ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
     ctx.fillStyle = b.homing ? ITEM_COLORS.homing : '#F2FBF9';
@@ -2084,6 +2098,7 @@
     ctx.lineWidth = 2;
     ctx.fill();
     ctx.stroke();
+    if (isTeammateBullet) ctx.restore();
   }
 
   // ---------- 死亡爆炸特效 ----------
